@@ -1,0 +1,24 @@
+{
+  "name": "patchwork",
+  "version": "1.0.0",
+  "description": "Spread your code. Look human. A CLI tool that distributes project files across natural-looking Git commits.",
+  "type": "module",
+  "main": "index.js",
+  "bin": {
+    "patchwork": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": ["git", "commits", "cli", "developer-tools"],
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^5.4.1",
+    "dotenv": "^16.5.0",
+    "fs-extra": "^11.3.0",
+    "inquirer": "^12.6.0",
+    "openai": "^4.103.0",
+    "ora": "^8.2.0",
+    "simple-git": "^3.27.0"
+  }
+}
