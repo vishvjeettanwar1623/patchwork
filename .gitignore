@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Environment variables
+.env
+
+# Session state
+gitdrift-session.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# vaxis AI rule files and workspace config
+.ai-rules
+ai-prompt.txt
+*.code-workspace
