@@ -18,19 +18,30 @@ export async function setupRepo(repoUrl, username, pat) {
   await fs.ensureDir(tempDir);
 
   const git = simpleGit(tempDir);
-
-  // Initialize repo
-  await git.init();
-
-  // Set remote with credentials embedded
   const authUrl = buildAuthUrl(repoUrl, username, pat);
-  await git.addRemote("origin", authUrl);
+  let isIncremental = false;
+
+  try {
+    const spinner = ora({
+      text: "  Checking remote repository history...",
+      color: "cyan",
+    }).start();
+
+    // Attempt to clone the existing repository into the temp directory
+    await simpleGit().clone(authUrl, tempDir);
+    spinner.succeed("  Found existing remote repository history. Running in Incremental Mode!");
+    isIncremental = true;
+  } catch (error) {
+    // If clone fails (e.g. empty repository), initialize a fresh one
+    await git.init();
+    await git.addRemote("origin", authUrl);
+  }
 
   // Configure user identity
   await git.addConfig("user.name", username);
   await git.addConfig("user.email", `${username}@users.noreply.github.com`);
 
-  return { tempDir, git };
+  return { tempDir, git, isIncremental };
 }
 
 /**

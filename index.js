@@ -3,11 +3,15 @@
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import path from "path";
+import fs from "fs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 dotenv.config({ path: path.join(__dirname, ".env") });
+
+import ora from "ora";
+import crypto from "crypto";
 
 import {
   showBanner,
@@ -28,12 +32,58 @@ import {
   askLargeProjectConfirm,
 } from "./prompts.js";
 
-import { scanFiles } from "./scanner.js";
+import { scanFiles, isBinaryFile } from "./scanner.js";
 import { chunkCommits, getTotalCommitCount } from "./chunker.js";
 import { generateTimestamps, formatTimestamp } from "./timestamps.js";
 import { initMessageClient, generateMessage, delay } from "./messages.js";
 import { setupRepo, copyFilesToTemp, createCommit, pushToRemote, cleanup } from "./git.js";
 import { sessionExists, loadSession, saveSession, deleteSession } from "./session.js";
+
+/**
+ * Compute MD5 hash of a file for comparison.
+ * Normalizes line endings for text files to avoid false positives on Windows.
+ */
+function getFileHash(filePath) {
+  try {
+    if (isBinaryFile(filePath)) {
+      const content = fs.readFileSync(filePath);
+      return crypto.createHash("md5").update(content).digest("hex");
+    } else {
+      const content = fs.readFileSync(filePath, "utf8");
+      const normalized = content.replace(/\r\n/g, "\n");
+      return crypto.createHash("md5").update(normalized, "utf8").digest("hex");
+    }
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Get new or modified files in local directory compared to temp cloned directory.
+ */
+function getChangedFiles(localDir, tempDir, allLocalFiles) {
+  const changedFiles = [];
+
+  for (const relativePath of allLocalFiles) {
+    const localPath = path.join(localDir, relativePath);
+    const tempPath = path.join(tempDir, relativePath);
+
+    if (!fs.existsSync(tempPath)) {
+      // New file
+      changedFiles.push(relativePath);
+    } else {
+      // Compare hashes
+      const localHash = getFileHash(localPath);
+      const tempHash = getFileHash(tempPath);
+      if (localHash !== tempHash) {
+        // Modified file
+        changedFiles.push(relativePath);
+      }
+    }
+  }
+
+  return changedFiles;
+}
 
 /**
  * Main entry point.
@@ -111,13 +161,59 @@ async function main() {
       showError("No files found in the project folder. Nothing to do.");
       process.exit(1);
     }
+  }
 
-    // Large project warning
-    if (scanResult.totalCount > 200) {
-      showLargeProjectWarning(scanResult.totalCount);
+  // ──────────────────────────────────────────────
+  // Step 7: Setup git repo in temp directory (Moved up)
+  // ──────────────────────────────────────────────
+  let tempDir;
+  let git;
+  let isIncremental = false;
+
+  try {
+    const setup = await setupRepo(inputs.repoUrl, inputs.username, inputs.pat);
+    tempDir = setup.tempDir;
+    git = setup.git;
+    isIncremental = setup.isIncremental;
+    showInfo(`Working directory: ${tempDir}\n`);
+  } catch (error) {
+    showError(`Failed to initialize git repo: ${error.message}`);
+    process.exit(1);
+  }
+
+  // Handle Incremental Mode comparison (only for new runs)
+  if (!isResuming && isIncremental) {
+    showInfo("Comparing local project files with remote repository...");
+    const changedFiles = getChangedFiles(inputs.folderPath, tempDir, files);
+    showInfo(`Found ${changedFiles.length} new or modified file(s) to commit.\n`);
+
+    if (changedFiles.length === 0) {
+      showInfo("No changes detected. Your GitHub repository is already up to date!");
+      await cleanup(tempDir);
+      process.exit(0);
+    }
+
+    // Filter file list to only changed/new files
+    files = changedFiles;
+
+    // Re-verify binary files list
+    const updatedBinaryFiles = new Set();
+    for (const file of files) {
+      if (isBinaryFile(file)) {
+        updatedBinaryFiles.add(file);
+      }
+    }
+    binaryFiles = updatedBinaryFiles;
+  }
+
+  // Large project warning (only for fresh runs, based on the filtered file list)
+  if (!isResuming) {
+    if (files.length > 200) {
+      showLargeProjectWarning(files.length);
       const proceed = await askLargeProjectConfirm();
       if (!proceed) {
         showInfo("Exiting. No changes were made.");
+        await cleanup(tempDir);
         process.exit(0);
       }
     }
@@ -143,22 +239,6 @@ async function main() {
   initMessageClient();
 
   // ──────────────────────────────────────────────
-  // Step 7: Setup git repo in temp directory
-  // ──────────────────────────────────────────────
-  let tempDir;
-  let git;
-
-  try {
-    const setup = await setupRepo(inputs.repoUrl, inputs.username, inputs.pat);
-    tempDir = setup.tempDir;
-    git = setup.git;
-    showInfo(`Working directory: ${tempDir}\n`);
-  } catch (error) {
-    showError(`Failed to initialize git repo: ${error.message}`);
-    process.exit(1);
-  }
-
-  // ──────────────────────────────────────────────
   // Step 8: Create commits
   // ──────────────────────────────────────────────
   const commitLog = [];
@@ -170,14 +250,49 @@ async function main() {
       ? timestampedChunks.slice(0, 1)
       : timestampedChunks;
 
+  // Pre-generate all commit messages in parallel
+  const allCommits = chunksToProcess.flatMap((day) =>
+    day.commits.map((commit) => ({ day, commit }))
+  );
+
+  const totalCommitsToCreate = allCommits.length;
+
+  if (totalCommitsToCreate > 0) {
+    const spinner = ora({
+      text: "  Generating AI commit messages in parallel...",
+      color: "cyan",
+    }).start();
+
+    try {
+      const messages = await Promise.all(
+        allCommits.map(async ({ commit }, idx) => {
+          // Stagger the start of each concurrent request to avoid rate limit bursts
+          await delay(idx * 100);
+          return generateMessage(commit.files, inputs.folderPath);
+        })
+      );
+
+      allCommits.forEach(({ commit }, idx) => {
+        commit.message = messages[idx];
+      });
+
+      spinner.succeed("  Generated all commit messages!");
+      console.log();
+    } catch (error) {
+      spinner.fail("  Failed to generate commit messages!");
+      showError(error.message);
+      await cleanup(tempDir);
+      process.exit(1);
+    }
+  }
+
   try {
     for (const day of chunksToProcess) {
       for (const commit of day.commits) {
         commitIndex++;
 
-        // Generate commit message
-        const message = await generateMessage(commit.files, inputs.folderPath);
-        await delay(200);
+        // Message is pre-generated
+        const message = commit.message || "Update project files";
 
         // Copy files to temp directory
         await copyFilesToTemp(inputs.folderPath, tempDir, commit.files);
@@ -194,7 +309,7 @@ async function main() {
           fileCount: commit.files.length,
         });
 
-        showProgress(commitIndex, getTotalCommitCount(chunksToProcess), message);
+        showProgress(commitIndex, totalCommitsToCreate, message);
       }
     }
   } catch (error) {
