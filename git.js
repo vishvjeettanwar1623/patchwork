@@ -158,16 +158,18 @@ export async function cleanup(tempDir) {
 /**
  * Sync the user's actual project folder with what PatchWork just pushed.
  *
- * Runs `git fetch` then `git checkout origin/<branch> -- <file>` for each
- * committed file so VS Code / any editor's Source Control panel reflects the
- * pushed state without touching other uncommitted work in the folder.
+ * Runs `git fetch origin` then `git reset --hard origin` so the local branch
+ * snaps to exactly match the remote — VS Code / any editor's Source Control
+ * panel will reflect the pushed state with 0 pending changes for committed
+ * files.
+ *
+ * Using bare "origin" (not "origin/master" or "origin/main") lets git resolve
+ * the remote's default branch via origin/HEAD automatically.
  *
  * @param {string} folderPath - Absolute path to the user's project folder.
- * @param {string} branch     - Branch that was pushed to (e.g. "main").
- * @param {string[]} files    - Relative file paths that were committed.
  * @returns {Promise<boolean>} true if sync succeeded, false if skipped/failed.
  */
-export async function syncLocalRepo(folderPath, branch, files) {
+export async function syncLocalRepo(folderPath) {
   // Only proceed if this folder is actually a git repository.
   const gitDir = path.join(folderPath, ".git");
   const isGitRepo = await fs.pathExists(gitDir);
@@ -176,22 +178,16 @@ export async function syncLocalRepo(folderPath, branch, files) {
   try {
     const localGit = simpleGit(folderPath);
 
-    // Fetch the latest remote refs (non-destructive).
+    // Download latest remote refs — non-destructive.
     await localGit.fetch("origin");
 
-    // Checkout only the files PatchWork committed from the remote branch.
-    // This marks them as "clean" in the index without affecting anything else.
-    for (const file of files) {
-      try {
-        await localGit.checkout([`origin/${branch}`, "--", file]);
-      } catch {
-        // Individual file may not exist on the branch yet — skip silently.
-      }
-    }
+    // Snap local branch to match remote exactly.
+    // "origin" follows origin/HEAD, so this works for both master and main.
+    await localGit.reset(["--hard", "origin"]);
 
     return true;
   } catch {
-    // Not a fatal error — user can still pull manually.
+    // Not a fatal error — user can still run `git fetch && git reset --hard origin` manually.
     return false;
   }
 }

@@ -337,7 +337,7 @@ async function main() {
   // ──────────────────────────────────────────────
   // Step 10b: Sync local git repo so editors reflect the push
   // ──────────────────────────────────────────────
-  const synced = await syncLocalRepo(inputs.folderPath, pushedBranch, files);
+  const synced = await syncLocalRepo(inputs.folderPath);
   if (synced) {
     showInfo("Local git synced — your editor's Source Control is now up to date. ✔");
   }
