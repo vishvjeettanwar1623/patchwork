@@ -2,7 +2,7 @@ import OpenAI from "openai";
 import fs from "fs";
 import path from "path";
 import { isBinaryFile } from "./scanner.js";
-import { showWarning } from "./display.js";
+import { showWarning, showInfo } from "./display.js";
 
 let apiKeys = [];
 let clients = [];
@@ -42,6 +42,15 @@ export function initMessageClient() {
 
   primaryModel = modelName || FREE_MODELS[0];
 
+  if (process.env.DISABLE_AI === "true") {
+    if (!warnedOnce) {
+      showInfo("AI generation disabled via DISABLE_AI in .env — using local commit messages.");
+      warnedOnce = true;
+    }
+    apiAvailable = false;
+    return;
+  }
+
   if (apiKeys.length === 0) {
     if (!warnedOnce) {
       showWarning("No OpenRouter API key found in .env — using fallback commit messages.");
@@ -59,6 +68,14 @@ export function initMessageClient() {
 
   apiAvailable = true;
 }
+
+/**
+ * Check if the AI API is configured and available.
+ */
+export function isAPIAvailable() {
+  return apiAvailable;
+}
+
 
 /**
  * Cache for generated messages.
@@ -91,7 +108,7 @@ export async function generateMessage(files, sourceDir) {
 
   // If API is not available, use fallback immediately
   if (!apiAvailable) {
-    const fallback = buildFallbackMessage(files);
+    const fallback = buildFallbackMessage(files, sourceDir);
     messageCache.set(cacheKey, fallback);
     return fallback;
   }
@@ -106,7 +123,7 @@ export async function generateMessage(files, sourceDir) {
       showWarning(`AI Message Generation failed: ${error.message}. Using fallback commit messages.`);
       warnedOnce = true;
     }
-    const fallback = buildFallbackMessage(files);
+    const fallback = buildFallbackMessage(files, sourceDir);
     messageCache.set(cacheKey, fallback);
     return fallback;
   }
@@ -267,23 +284,353 @@ function sanitizeMessage(raw) {
   return null;
 }
 
+const CONFIG_FILES = new Set([
+  'package.json',
+  'package-lock.json',
+  'yarn.lock',
+  'pnpm-lock.yaml',
+  'tsconfig.json',
+  'jsconfig.json',
+  'webpack.config.js',
+  'vite.config.js',
+  'next.config.js',
+  'rollup.config.js',
+  'gulpfile.js',
+  'Gruntfile.js',
+  '.gitignore',
+  '.gitattributes',
+  '.env',
+  '.env.example',
+  '.env.local',
+  '.env.development',
+  '.env.production',
+  '.eslintrc',
+  '.eslintrc.js',
+  '.eslintrc.json',
+  '.prettierrc',
+  '.prettierrc.json',
+  'prettier.config.js',
+  'babel.config.js',
+  '.babelrc',
+  'docker-compose.yml',
+  'docker-compose.yaml',
+  'Dockerfile',
+  'cargo.toml',
+  'cargo.lock',
+  'go.mod',
+  'go.sum',
+  'gemfile',
+  'gemfile.lock',
+  'composer.json',
+  'composer.lock',
+  'requirements.txt'
+]);
+
+const CONFIG_EXTENSIONS = new Set(['.json', '.yaml', '.yml', '.toml', '.ini', '.xml', '.config']);
+const DOCS_EXTENSIONS = new Set(['.md', '.txt', '.rst', '.adoc', '.pdf']);
+const DOCS_FILES = new Set(['license', 'licence', 'license.md', 'contributing.md', 'changelog.md', 'readme', 'readme.md']);
+const STYLE_EXTENSIONS = new Set(['.css', '.scss', '.sass', '.less', '.styl', '.postcss']);
+const TEST_PATTERNS = [/test/i, /spec/i, /__tests__/i, /__mocks__/i];
+
+const ASSET_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico',
+  '.mp3', '.wav', '.flac', '.mp4', '.mov', '.avi', '.mkv',
+  '.woff', '.woff2', '.eot', '.ttf', '.otf'
+]);
+
+const SOURCE_EXTENSIONS = new Set([
+  '.js', '.jsx', '.ts', '.tsx', '.py', '.go', '.rs', '.rb',
+  '.java', '.cs', '.php', '.cpp', '.c', '.h', '.hpp', '.sh',
+  '.sql', '.graphql', '.gql', '.swift', '.kt', '.kts', '.scala',
+  '.html', '.vue', '.svelte'
+]);
+
+/**
+ * Categorize a file based on name and extension.
+ */
+function getFileCategory(file) {
+  const base = path.basename(file);
+  const baseLower = base.toLowerCase();
+  const ext = path.extname(file).toLowerCase();
+
+  if (TEST_PATTERNS.some(pat => pat.test(file))) {
+    return 'test';
+  }
+  if (CONFIG_FILES.has(baseLower) || CONFIG_EXTENSIONS.has(ext) || baseLower.startsWith('.env')) {
+    return 'config';
+  }
+  if (DOCS_FILES.has(baseLower) || DOCS_EXTENSIONS.has(ext)) {
+    return 'docs';
+  }
+  if (STYLE_EXTENSIONS.has(ext)) {
+    return 'style';
+  }
+  if (ASSET_EXTENSIONS.has(ext)) {
+    return 'asset';
+  }
+  if (SOURCE_EXTENSIONS.has(ext)) {
+    const normalizedPath = file.replace(/\\/g, '/');
+    if (
+      normalizedPath.includes('components/') ||
+      normalizedPath.includes('views/') ||
+      ['.jsx', '.tsx', '.vue', '.svelte'].includes(ext)
+    ) {
+      return 'component';
+    }
+    return 'source';
+  }
+  return 'other';
+}
+
+/**
+ * Generate a commit message for a single file.
+ */
+function generateSingleFileMessage(file, sourceDir) {
+  const base = path.basename(file);
+  const ext = path.extname(file).toLowerCase();
+  const baseLower = base.toLowerCase();
+  const nameWithoutExt = path.basename(file, ext);
+  const cleanName = nameWithoutExt.replace(/\.(test|spec)$/i, '');
+
+  if (baseLower === 'package.json' || baseLower === 'package-lock.json' || baseLower === 'yarn.lock' || baseLower === 'pnpm-lock.yaml') {
+    return 'chore: Update project dependencies';
+  }
+  if (baseLower === '.gitignore') {
+    return 'chore: Update gitignore configuration';
+  }
+  if (baseLower === 'readme.md') {
+    return 'docs: Update README documentation';
+  }
+  if (baseLower === 'license' || baseLower === 'license.md') {
+    return 'chore: Update project license';
+  }
+  if (baseLower.startsWith('.env')) {
+    return 'chore: Update environment configuration';
+  }
+  if (baseLower === 'tsconfig.json' || baseLower === 'jsconfig.json') {
+    return 'chore: Update compiler configurations';
+  }
+
+  const category = getFileCategory(file);
+  const prefix = getConventionalPrefix(category);
+
+  const symbol = extractFileSymbol(file, category, sourceDir);
+
+  if (category === 'test') {
+    const targetSymbol = symbol || cleanName;
+    return `test: Add tests for ${targetSymbol}`;
+  }
+  if (category === 'style') {
+    return `style: Update styling for ${cleanName}`;
+  }
+  if (category === 'docs') {
+    const targetDoc = symbol || base;
+    return `docs: Update ${targetDoc}`;
+  }
+  if (category === 'asset') {
+    return `chore: Add static asset ${base}`;
+  }
+  if (category === 'component') {
+    const targetComp = symbol || cleanName;
+    return `feat: Implement ${targetComp} component`;
+  }
+  if (category === 'config') {
+    return `chore: Update config for ${cleanName}`;
+  }
+  if (category === 'source') {
+    const targetFn = symbol || cleanName;
+    return `feat: Implement ${targetFn} functionality`;
+  }
+
+  return `chore: Update ${base}`;
+}
+
+/**
+ * Extract the first significant symbol (class/function/heading) from a file.
+ */
+function extractFileSymbol(file, category, sourceDir) {
+  if (!sourceDir) return null;
+  try {
+    const fullPath = path.join(sourceDir, file);
+    if (!fs.existsSync(fullPath)) return null;
+
+    if (category === 'docs') {
+      const content = fs.readFileSync(fullPath, 'utf8');
+      const lines = content.split('\n');
+      for (let i = 0; i < Math.min(lines.length, 30); i++) {
+        const line = lines[i].trim();
+        const match = line.match(/^##?\s+(.+)$/);
+        if (match) {
+          return match[1].replace(/[\[\]]/g, '').replace(/\([^)]*\)/g, '').trim();
+        }
+      }
+    } else if (category === 'source' || category === 'component') {
+      const content = fs.readFileSync(fullPath, 'utf8');
+      const lines = content.split('\n').slice(0, 100);
+      const textToScan = lines.join('\n');
+
+      const classMatch = textToScan.match(/(?:export\s+default\s+|export\s+)?class\s+([A-Za-z0-9_]+)/);
+      if (classMatch) return classMatch[1];
+
+      const funcMatch = textToScan.match(/(?:export\s+default\s+|export\s+)?function\s+([A-Za-z0-9_]+)/);
+      if (funcMatch) return funcMatch[1];
+
+      const constMatch = textToScan.match(/export\s+const\s+([A-Za-z0-9_]+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z0-9_]+)\s*=>/);
+      if (constMatch) return constMatch[1];
+    }
+  } catch (err) {
+    // Ignore read errors
+  }
+  return null;
+}
+
+/**
+ * Map file category to Conventional Commits prefix.
+ */
+function getConventionalPrefix(category) {
+  switch (category) {
+    case 'docs': return 'docs';
+    case 'config': return 'chore';
+    case 'style': return 'style';
+    case 'test': return 'test';
+    case 'component': return 'feat';
+    case 'source': return 'feat';
+    case 'asset': return 'chore';
+    default: return 'chore';
+  }
+}
+
 /**
  * Build a fallback commit message when API is unavailable.
  */
-function buildFallbackMessage(files) {
+export function buildFallbackMessage(files, sourceDir) {
+  if (!files || files.length === 0) {
+    return "chore: Update project files";
+  }
+
   if (files.length === 1) {
-    const name = path.basename(files[0]);
-    return `Add ${name}`;
+    return generateSingleFileMessage(files[0], sourceDir);
   }
 
-  // Try to find a common directory
-  const dirs = files.map((f) => path.dirname(f)).filter((d) => d !== ".");
+  const categories = files.map(f => ({ file: f, cat: getFileCategory(f) }));
+  const uniqueCategories = new Set(categories.map(c => c.cat));
+
+  if (uniqueCategories.size === 1) {
+    const singleCat = Array.from(uniqueCategories)[0];
+    const prefix = getConventionalPrefix(singleCat);
+    if (singleCat === 'docs') {
+      return `${prefix}: Update project documentation`;
+    }
+    if (singleCat === 'config') {
+      return `${prefix}: Update project configuration files`;
+    }
+    if (singleCat === 'style') {
+      return `${prefix}: Update user interface styling and themes`;
+    }
+    if (singleCat === 'test') {
+      return `${prefix}: Update and expand unit test suites`;
+    }
+    if (singleCat === 'asset') {
+      return `${prefix}: Add project assets and design resources`;
+    }
+    if (singleCat === 'component') {
+      return `${prefix}: Implement component upgrades and UI fixes`;
+    }
+  }
+
+  // Common directory check
+  const normalizedPaths = files.map(f => f.replace(/\\/g, '/'));
+  const dirs = normalizedPaths.map(f => {
+    const parts = f.split('/');
+    if (parts.length > 1) {
+      parts.pop();
+      return parts.join('/');
+    }
+    return '';
+  }).filter(Boolean);
+
+  let commonDir = '';
   if (dirs.length > 0) {
-    const commonDir = dirs[0].split("/")[0];
-    return `Add ${files.length} files to ${commonDir}`;
+    const firstDir = dirs[0];
+    const allShareDir = dirs.every(d => d === firstDir);
+    if (allShareDir) {
+      commonDir = firstDir;
+    }
   }
 
-  return `Add ${files.length} project files`;
+  const sourceFiles = categories.filter(c => c.cat === 'source' || c.cat === 'component');
+  const configFiles = categories.filter(c => c.cat === 'config');
+  const docsFiles = categories.filter(c => c.cat === 'docs');
+  const styleFiles = categories.filter(c => c.cat === 'style');
+
+  if (sourceFiles.length === 1) {
+    const primaryFile = sourceFiles[0].file;
+    const base = path.basename(primaryFile);
+    const ext = path.extname(primaryFile).toLowerCase();
+    const nameWithoutExt = path.basename(primaryFile, ext);
+    const cleanName = nameWithoutExt.replace(/\.(test|spec)$/i, '');
+    const symbol = extractFileSymbol(primaryFile, sourceFiles[0].cat, sourceDir);
+    const targetName = symbol || cleanName;
+
+    let prefix = 'feat';
+    let action = 'Update';
+    if (sourceFiles[0].cat === 'component') {
+      action = 'Implement';
+    }
+
+    const hasConfig = configFiles.length > 0;
+    const hasDocs = docsFiles.length > 0;
+    const hasStyle = styleFiles.length > 0;
+    const hasTest = categories.some(c => c.cat === 'test');
+    const hasAsset = categories.some(c => c.cat === 'asset');
+
+    if (files.length === 2) {
+      if (hasStyle) {
+        return `${prefix}: ${action} ${targetName} and update styling`;
+      }
+      if (hasTest) {
+        return `${prefix}: ${action} ${targetName} and add tests`;
+      }
+      if (hasAsset) {
+        return `${prefix}: ${action} ${targetName} and add assets`;
+      }
+    }
+
+    const otherFilesCount = (hasConfig ? configFiles.length : 0) + (hasDocs ? docsFiles.length : 0);
+    if (otherFilesCount === files.length - 1) {
+      if (hasConfig && hasDocs) {
+        return `${prefix}: ${action} ${targetName} and update config/docs`;
+      }
+      if (hasConfig) {
+        return `${prefix}: ${action} ${targetName} and adjust configurations`;
+      }
+      if (hasDocs) {
+        return `${prefix}: ${action} ${targetName} and update documentation`;
+      }
+    }
+  }
+
+  if (commonDir) {
+    const lastPart = commonDir.split('/').pop();
+    if (sourceFiles.length > 0) {
+      return `feat: Update source files in ${lastPart}`;
+    }
+    return `chore: Update files in ${commonDir}`;
+  }
+
+  const counts = {};
+  for (const c of categories) {
+    counts[c.cat] = (counts[c.cat] || 0) + 1;
+  }
+
+  if (counts['source'] && counts['style']) {
+    return `feat: Update source code and styles (${files.length} files)`;
+  }
+  if (counts['source'] && counts['config']) {
+    return `feat: Update functionalities and project settings`;
+  }
+
+  return `chore: Add ${files.length} project files`;
 }
 
 /**
