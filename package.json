@@ -5,7 +5,7 @@
   "type": "module",
   "main": "index.js",
   "bin": {
-    "patchwork": "./index.js"
+    "patchwork": "./bin.cjs"
   },
   "scripts": {
     "start": "node index.js"

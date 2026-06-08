@@ -70,7 +70,9 @@ const messageCache = new Map();
  * The system prompt for commit message generation.
  */
 const SYSTEM_PROMPT =
-  "You are a developer writing a real Git commit message. Based on the filenames and partial content provided, write a single concise commit message in imperative tone (e.g. 'Add user authentication middleware'). Max 72 characters. No prefix like 'feat:' unless it fits naturally. Return only the commit message, nothing else.";
+  "You are a Git commit message generator. Your ONLY output must be a single commit message in imperative tone (e.g. 'Add user authentication'). " +
+  "Rules: max 72 characters, no quotes, no punctuation at the end, no explanations, no reasoning, no preamble. " +
+  "Output the commit message text ONLY — nothing before it, nothing after it.";
 
 /**
  * Generate a commit message for a set of files.
@@ -151,9 +153,12 @@ async function callAPI(files, sourceDir) {
 
   // Try each model until one succeeds
   for (const modelName of modelsToTry) {
-    // Try up to clients.length different keys for this model
+    let modelFailed = false;
+
+    // Try up to clients.length different keys for this model.
+    // Only rotate keys for rate-limit errors (429). For model-level
+    // errors (empty output, 404, 400) break immediately and try next model.
     for (let attempt = 0; attempt < clients.length; attempt++) {
-      // Rotate clients to distribute requests across keys
       const client = clients[clientIndex % clients.length];
       clientIndex++;
 
@@ -164,22 +169,99 @@ async function callAPI(files, sourceDir) {
             { role: "system", content: SYSTEM_PROMPT },
             { role: "user", content },
           ],
-          max_tokens: 150,
+          max_tokens: 300,
           temperature: 0.7,
         });
 
-        const message = response.choices[0]?.message?.content?.trim();
+        const raw = response.choices[0]?.message?.content?.trim();
+        const message = sanitizeMessage(raw);
 
         if (message) {
-          return message.substring(0, 72);
+          return message;
         }
+
+        // Model responded but with empty / unsanitizable content.
+        // No point rotating keys — move straight to next model.
+        modelFailed = true;
+        break;
+
       } catch (error) {
         lastError = error;
+
+        const status = error?.status ?? error?.response?.status ?? 0;
+        const msg = error?.message ?? "";
+
+        // 429 = rate limit → try next key for same model.
+        if (status === 429) continue;
+
+        // Any other error (400 bad request, 404 not found, empty output,
+        // "model output must contain text", etc.) → skip this model entirely.
+        modelFailed = true;
+        break;
       }
     }
+
+    if (modelFailed) continue; // outer loop: move to next model
   }
 
   throw lastError || new Error("All models failed");
+}
+
+/**
+ * Sanitize a raw model response into a clean commit message.
+ *
+ * Reasoning models (e.g. DeepSeek R1 via openrouter/free) sometimes leak
+ * their chain-of-thought into `content` before the final answer. This
+ * function strips those artifacts and returns only the usable commit message.
+ *
+ * Returns null if no valid message can be extracted.
+ */
+function sanitizeMessage(raw) {
+  if (!raw) return null;
+
+  // Patterns that indicate reasoning leakage rather than a commit message.
+  const REASONING_PREFIXES = [
+    /^we need to/i,
+    /^i need to/i,
+    /^let me/i,
+    /^let's/i,
+    /^based on/i,
+    /^looking at/i,
+    /^the files? (in|include|show|contain)/i,
+    /^this commit/i,
+    /^to write/i,
+    /^okay[,.]?/i,
+    /^alright[,.]?/i,
+    /^sure[,.]?/i,
+    /^here('s| is)/i,
+    /^so[,\s]/i,
+    /^now[,\s]/i,
+  ];
+
+  // Split into lines and discard obvious reasoning lines.
+  const lines = raw
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    // Skip lines that look like reasoning text.
+    const isReasoning = REASONING_PREFIXES.some((re) => re.test(line));
+    if (isReasoning) continue;
+
+    // Skip lines that are too long (reasoning paragraphs) or too short.
+    if (line.length > 100 || line.length < 3) continue;
+
+    // Strip surrounding quotes if the model wrapped the message.
+    const cleaned = line.replace(/^["'`]|["'`]$/g, "").trim();
+
+    // Must start with a capital or common imperative verbs.
+    if (!/^[A-Z]/.test(cleaned)) continue;
+
+    return cleaned.substring(0, 72);
+  }
+
+  return null;
 }
 
 /**
