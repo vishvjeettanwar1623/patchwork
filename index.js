@@ -35,7 +35,7 @@ import {
 import { scanFiles, isBinaryFile } from "./scanner.js";
 import { chunkCommits, getTotalCommitCount } from "./chunker.js";
 import { generateTimestamps, formatTimestamp } from "./timestamps.js";
-import { initMessageClient, generateMessage, delay } from "./messages.js";
+import { initMessageClient, generateMessage, delay, isAPIAvailable } from "./messages.js";
 import { setupRepo, copyFilesToTemp, createCommit, pushToRemote, cleanup, syncLocalRepo } from "./git.js";
 import { sessionExists, loadSession, saveSession, deleteSession } from "./session.js";
 
@@ -258,23 +258,29 @@ async function main() {
   const totalCommitsToCreate = allCommits.length;
 
   if (totalCommitsToCreate > 0) {
+    const useAI = isAPIAvailable();
+    const spinnerText = useAI ? "  Generating AI commit messages..." : "  Generating local commit messages...";
     const spinner = ora({
-      text: "  Generating AI commit messages...",
+      text: spinnerText,
       color: "cyan",
     }).start();
 
     try {
-      // Generate messages sequentially with a gap between requests.
-      // OpenRouter free tier allows ~20 req/min (≈1 req / 3s).
-      // Firing all requests at once exhausts all keys instantly (429).
+      // Generate messages sequentially.
+      // If using AI, we add a 3s gap between requests to avoid OpenRouter free tier rate limits (20 req/min).
+      // If using local generation, we do not delay.
       for (let idx = 0; idx < allCommits.length; idx++) {
         const { commit } = allCommits[idx];
-        if (idx > 0) await delay(3000); // 3s gap keeps us inside rate limits
+        if (useAI && idx > 0) {
+          await delay(3000);
+        }
         commit.message = await generateMessage(commit.files, inputs.folderPath);
-        spinner.text = `  Generating AI commit messages... (${idx + 1}/${allCommits.length})`;
+        const progressLabel = useAI ? "Generating AI commit messages..." : "Generating local commit messages...";
+        spinner.text = `  ${progressLabel} (${idx + 1}/${allCommits.length})`;
       }
 
-      spinner.succeed("  Generated all commit messages!");
+      const succeedText = useAI ? "  Generated all AI commit messages!" : "  Generated all local commit messages!";
+      spinner.succeed(succeedText);
       console.log();
     } catch (error) {
       spinner.fail("  Failed to generate commit messages!");
