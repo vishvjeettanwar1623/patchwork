@@ -36,7 +36,7 @@ import { scanFiles, isBinaryFile } from "./scanner.js";
 import { chunkCommits, getTotalCommitCount } from "./chunker.js";
 import { generateTimestamps, formatTimestamp } from "./timestamps.js";
 import { initMessageClient, generateMessage, delay } from "./messages.js";
-import { setupRepo, copyFilesToTemp, createCommit, pushToRemote, cleanup } from "./git.js";
+import { setupRepo, copyFilesToTemp, createCommit, pushToRemote, cleanup, syncLocalRepo } from "./git.js";
 import { sessionExists, loadSession, saveSession, deleteSession } from "./session.js";
 
 /**
@@ -259,22 +259,20 @@ async function main() {
 
   if (totalCommitsToCreate > 0) {
     const spinner = ora({
-      text: "  Generating AI commit messages in parallel...",
+      text: "  Generating AI commit messages...",
       color: "cyan",
     }).start();
 
     try {
-      const messages = await Promise.all(
-        allCommits.map(async ({ commit }, idx) => {
-          // Stagger the start of each concurrent request to avoid rate limit bursts
-          await delay(idx * 100);
-          return generateMessage(commit.files, inputs.folderPath);
-        })
-      );
-
-      allCommits.forEach(({ commit }, idx) => {
-        commit.message = messages[idx];
-      });
+      // Generate messages sequentially with a gap between requests.
+      // OpenRouter free tier allows ~20 req/min (≈1 req / 3s).
+      // Firing all requests at once exhausts all keys instantly (429).
+      for (let idx = 0; idx < allCommits.length; idx++) {
+        const { commit } = allCommits[idx];
+        if (idx > 0) await delay(3000); // 3s gap keeps us inside rate limits
+        commit.message = await generateMessage(commit.files, inputs.folderPath);
+        spinner.text = `  Generating AI commit messages... (${idx + 1}/${allCommits.length})`;
+      }
 
       spinner.succeed("  Generated all commit messages!");
       console.log();
@@ -322,8 +320,9 @@ async function main() {
   // Step 9: Push to remote
   // ──────────────────────────────────────────────
   console.log();
+  let pushedBranch = "main";
   try {
-    await pushToRemote(git);
+    pushedBranch = await pushToRemote(git);
   } catch (error) {
     showError(error.message);
     await cleanup(tempDir);
@@ -334,6 +333,14 @@ async function main() {
   // Step 10: Cleanup temp directory
   // ──────────────────────────────────────────────
   await cleanup(tempDir);
+
+  // ──────────────────────────────────────────────
+  // Step 10b: Sync local git repo so editors reflect the push
+  // ──────────────────────────────────────────────
+  const synced = await syncLocalRepo(inputs.folderPath, pushedBranch, files);
+  if (synced) {
+    showInfo("Local git synced — your editor's Source Control is now up to date. ✔");
+  }
 
   // ──────────────────────────────────────────────
   // Step 11: Show summary

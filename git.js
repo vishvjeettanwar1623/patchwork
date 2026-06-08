@@ -154,3 +154,44 @@ export async function cleanup(tempDir) {
     // Silently ignore cleanup failures
   }
 }
+
+/**
+ * Sync the user's actual project folder with what PatchWork just pushed.
+ *
+ * Runs `git fetch` then `git checkout origin/<branch> -- <file>` for each
+ * committed file so VS Code / any editor's Source Control panel reflects the
+ * pushed state without touching other uncommitted work in the folder.
+ *
+ * @param {string} folderPath - Absolute path to the user's project folder.
+ * @param {string} branch     - Branch that was pushed to (e.g. "main").
+ * @param {string[]} files    - Relative file paths that were committed.
+ * @returns {Promise<boolean>} true if sync succeeded, false if skipped/failed.
+ */
+export async function syncLocalRepo(folderPath, branch, files) {
+  // Only proceed if this folder is actually a git repository.
+  const gitDir = path.join(folderPath, ".git");
+  const isGitRepo = await fs.pathExists(gitDir);
+  if (!isGitRepo) return false;
+
+  try {
+    const localGit = simpleGit(folderPath);
+
+    // Fetch the latest remote refs (non-destructive).
+    await localGit.fetch("origin");
+
+    // Checkout only the files PatchWork committed from the remote branch.
+    // This marks them as "clean" in the index without affecting anything else.
+    for (const file of files) {
+      try {
+        await localGit.checkout([`origin/${branch}`, "--", file]);
+      } catch {
+        // Individual file may not exist on the branch yet — skip silently.
+      }
+    }
+
+    return true;
+  } catch {
+    // Not a fatal error — user can still pull manually.
+    return false;
+  }
+}

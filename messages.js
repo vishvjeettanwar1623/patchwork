@@ -191,8 +191,11 @@ async function callAPI(files, sourceDir) {
         const status = error?.status ?? error?.response?.status ?? 0;
         const msg = error?.message ?? "";
 
-        // 429 = rate limit → try next key for same model.
-        if (status === 429) continue;
+        // 429 = rate limit → wait briefly, then try next key for same model.
+        if (status === 429) {
+          await new Promise((r) => setTimeout(r, 2000));
+          continue;
+        }
 
         // Any other error (400 bad request, 404 not found, empty output,
         // "model output must contain text", etc.) → skip this model entirely.
