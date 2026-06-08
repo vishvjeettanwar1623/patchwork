@@ -11,10 +11,8 @@ let apiAvailable = false;
 let warnedOnce = false;
 
 const FREE_MODELS = [
+  "openrouter/free",
   "meta-llama/llama-3.3-70b-instruct:free",
-  "google/gemma-2-9b-it:free",
-  "qwen/qwen-2-5-7b-instruct:free",
-  "mistralai/mistral-7b-instruct:free",
 ];
 
 /**
@@ -28,17 +26,25 @@ export function initMessageClient() {
 
   // Gather unique keys
   apiKeys = [];
-  if (apiKeysList) {
-    apiKeys = apiKeysList.split(",").map(k => k.trim()).filter(Boolean);
-  }
-  if (apiKey && apiKey.trim() && !apiKeys.includes(apiKey.trim())) {
-    apiKeys.push(apiKey.trim());
-  }
 
-  if (apiKeys.length === 0 || !modelName) {
+  const addKeys = (str) => {
+    if (!str) return;
+    const splitKeys = str.split(",").map(k => k.trim()).filter(Boolean);
+    for (const key of splitKeys) {
+      if (!apiKeys.includes(key)) {
+        apiKeys.push(key);
+      }
+    }
+  };
+
+  addKeys(apiKeysList);
+  addKeys(apiKey);
+
+  primaryModel = modelName || FREE_MODELS[0];
+
+  if (apiKeys.length === 0) {
     if (!warnedOnce) {
-      if (apiKeys.length === 0) showWarning("No OpenRouter API key found in .env — using fallback commit messages.");
-      if (!modelName) showWarning("OPENROUTER_MODEL not found in .env — using fallback commit messages.");
+      showWarning("No OpenRouter API key found in .env — using fallback commit messages.");
       warnedOnce = true;
     }
     apiAvailable = false;
@@ -51,7 +57,6 @@ export function initMessageClient() {
     apiKey: key,
   }));
 
-  primaryModel = modelName;
   apiAvailable = true;
 }
 
@@ -146,28 +151,31 @@ async function callAPI(files, sourceDir) {
 
   // Try each model until one succeeds
   for (const modelName of modelsToTry) {
-    // Rotate clients to distribute requests across keys
-    const client = clients[clientIndex % clients.length];
-    clientIndex++;
+    // Try up to clients.length different keys for this model
+    for (let attempt = 0; attempt < clients.length; attempt++) {
+      // Rotate clients to distribute requests across keys
+      const client = clients[clientIndex % clients.length];
+      clientIndex++;
 
-    try {
-      const response = await client.chat.completions.create({
-        model: modelName,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content },
-        ],
-        max_tokens: 100,
-        temperature: 0.7,
-      });
+      try {
+        const response = await client.chat.completions.create({
+          model: modelName,
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content },
+          ],
+          max_tokens: 150,
+          temperature: 0.7,
+        });
 
-      const message = response.choices[0]?.message?.content?.trim();
+        const message = response.choices[0]?.message?.content?.trim();
 
-      if (message) {
-        return message.substring(0, 72);
+        if (message) {
+          return message.substring(0, 72);
+        }
+      } catch (error) {
+        lastError = error;
       }
-    } catch (error) {
-      lastError = error;
     }
   }
 
