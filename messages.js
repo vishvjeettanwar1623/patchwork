@@ -4,22 +4,40 @@ import path from "path";
 import { isBinaryFile } from "./scanner.js";
 import { showWarning } from "./display.js";
 
-let client = null;
-let model = null;
+let apiKeys = [];
+let clients = [];
+let primaryModel = null;
 let apiAvailable = false;
 let warnedOnce = false;
 
+const FREE_MODELS = [
+  "meta-llama/llama-3.3-70b-instruct:free",
+  "google/gemma-2-9b-it:free",
+  "qwen/qwen-2-5-7b-instruct:free",
+  "mistralai/mistral-7b-instruct:free",
+];
+
 /**
- * Initialize the OpenRouter client.
+ * Initialize the OpenRouter client array.
  * Must be called before generateMessage().
  */
 export function initMessageClient() {
   const apiKey = process.env.OPENROUTER_API_KEY;
+  const apiKeysList = process.env.OPENROUTER_API_KEYS;
   const modelName = process.env.OPENROUTER_MODEL;
 
-  if (!apiKey || !modelName) {
+  // Gather unique keys
+  apiKeys = [];
+  if (apiKeysList) {
+    apiKeys = apiKeysList.split(",").map(k => k.trim()).filter(Boolean);
+  }
+  if (apiKey && apiKey.trim() && !apiKeys.includes(apiKey.trim())) {
+    apiKeys.push(apiKey.trim());
+  }
+
+  if (apiKeys.length === 0 || !modelName) {
     if (!warnedOnce) {
-      if (!apiKey) showWarning("OPENROUTER_API_KEY not found in .env — using fallback commit messages.");
+      if (apiKeys.length === 0) showWarning("No OpenRouter API key found in .env — using fallback commit messages.");
       if (!modelName) showWarning("OPENROUTER_MODEL not found in .env — using fallback commit messages.");
       warnedOnce = true;
     }
@@ -27,12 +45,13 @@ export function initMessageClient() {
     return;
   }
 
-  client = new OpenAI({
+  // Instantiate clients
+  clients = apiKeys.map(key => new OpenAI({
     baseURL: "https://openrouter.ai/api/v1",
-    apiKey,
-  });
+    apiKey: key,
+  }));
 
-  model = modelName;
+  primaryModel = modelName;
   apiAvailable = true;
 }
 
@@ -74,16 +93,23 @@ export async function generateMessage(files, sourceDir) {
     const message = await callAPI(files, sourceDir);
     messageCache.set(cacheKey, message);
     return message;
-  } catch {
+  } catch (error) {
     // Fallback on any API failure — never crash
+    if (!warnedOnce) {
+      showWarning(`AI Message Generation failed: ${error.message}. Using fallback commit messages.`);
+      warnedOnce = true;
+    }
     const fallback = buildFallbackMessage(files);
     messageCache.set(cacheKey, fallback);
     return fallback;
   }
 }
 
+let clientIndex = 0;
+
 /**
  * Call the OpenRouter API to generate a commit message.
+ * Rotates clients and falls back to alternative free models on error.
  */
 async function callAPI(files, sourceDir) {
   // Build the user content: filenames + first 30 lines of text files
@@ -108,24 +134,44 @@ async function callAPI(files, sourceDir) {
     }
   }
 
-  const response = await client.chat.completions.create({
-    model,
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content },
-    ],
-    max_tokens: 100,
-    temperature: 0.7,
-  });
-
-  const message = response.choices[0]?.message?.content?.trim();
-
-  if (!message) {
-    throw new Error("Empty response from API");
+  // Build the list of models to try
+  const modelsToTry = [primaryModel];
+  for (const fallbackModel of FREE_MODELS) {
+    if (fallbackModel !== primaryModel) {
+      modelsToTry.push(fallbackModel);
+    }
   }
 
-  // Ensure max 72 characters
-  return message.substring(0, 72);
+  let lastError = null;
+
+  // Try each model until one succeeds
+  for (const modelName of modelsToTry) {
+    // Rotate clients to distribute requests across keys
+    const client = clients[clientIndex % clients.length];
+    clientIndex++;
+
+    try {
+      const response = await client.chat.completions.create({
+        model: modelName,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content },
+        ],
+        max_tokens: 100,
+        temperature: 0.7,
+      });
+
+      const message = response.choices[0]?.message?.content?.trim();
+
+      if (message) {
+        return message.substring(0, 72);
+      }
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error("All models failed");
 }
 
 /**

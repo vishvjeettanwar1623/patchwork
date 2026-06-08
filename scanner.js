@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { execSync } from "child_process";
 
 /**
  * Directories to completely skip during scanning.
@@ -138,6 +139,26 @@ function getCategoryName(priority) {
 }
 
 /**
+ * Scan the folder using git ls-files if it is a git repository.
+ * Honors .gitignore rules perfectly.
+ * Returns null if not a git repository or git fails.
+ */
+function scanFilesWithGit(folderPath) {
+  try {
+    const gitBin = process.platform === "win32" ? "git.exe" : "git";
+    const output = execSync(`${gitBin} ls-files --others --cached --exclude-standard`, {
+      cwd: folderPath,
+      encoding: "utf8",
+      maxBuffer: 10 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return output.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Recursively scan a directory and return sorted, filtered file list.
  */
 export function scanFiles(folderPath) {
@@ -152,45 +173,62 @@ export function scanFiles(folderPath) {
     docs: 0,
   };
 
-  function walk(dir, relativeBase) {
-    let entries;
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return; // Skip unreadable directories
+  const gitFiles = scanFilesWithGit(folderPath);
+
+  if (gitFiles !== null) {
+    for (const relativePath of gitFiles) {
+      const filename = path.basename(relativePath);
+
+      if (EXCLUDED_FILES.has(filename)) continue;
+      if (isLockFile(filename)) continue;
+
+      const normalized = relativePath.replace(/\\/g, "/");
+      files.push(normalized);
+
+      if (isBinaryFile(filename)) {
+        binaryFiles.add(normalized);
+      }
+
+      const priority = getFilePriority(normalized);
+      const category = getCategoryName(priority);
+      breakdown[category]++;
     }
+  } else {
+    function walk(dir, relativeBase) {
+      let entries;
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
 
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-      const relativePath = path.join(relativeBase, entry.name);
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        const relativePath = path.join(relativeBase, entry.name);
 
-      if (entry.isDirectory()) {
-        if (EXCLUDED_DIRS.has(entry.name)) continue;
-        walk(fullPath, relativePath);
-      } else if (entry.isFile()) {
-        if (EXCLUDED_FILES.has(entry.name)) continue;
-        if (isLockFile(entry.name)) continue;
+        if (entry.isDirectory()) {
+          if (EXCLUDED_DIRS.has(entry.name)) continue;
+          walk(fullPath, relativePath);
+        } else if (entry.isFile()) {
+          if (EXCLUDED_FILES.has(entry.name)) continue;
+          if (isLockFile(entry.name)) continue;
 
-        // Normalize path separators to forward slashes for consistency
-        const normalized = relativePath.replace(/\\/g, "/");
-        files.push(normalized);
+          const normalized = relativePath.replace(/\\/g, "/");
+          files.push(normalized);
 
-        // Track binary files
-        if (isBinaryFile(entry.name)) {
-          binaryFiles.add(normalized);
+          if (isBinaryFile(entry.name)) {
+            binaryFiles.add(normalized);
+          }
+
+          const priority = getFilePriority(normalized);
+          const category = getCategoryName(priority);
+          breakdown[category]++;
         }
-
-        // Count breakdown
-        const priority = getFilePriority(normalized);
-        const category = getCategoryName(priority);
-        breakdown[category]++;
       }
     }
+    walk(folderPath, "");
   }
 
-  walk(folderPath, "");
-
-  // Sort by priority, then alphabetically within same priority
   files.sort((a, b) => {
     const pa = getFilePriority(a);
     const pb = getFilePriority(b);

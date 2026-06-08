@@ -8,7 +8,8 @@ import { showError } from "./display.js";
  */
 function getGitConfig(key) {
   try {
-    return execSync(`git config --get ${key}`, { encoding: "utf8" }).trim();
+    const gitBin = process.platform === "win32" ? "git.exe" : "git";
+    return execSync(`${gitBin} config --get ${key}`, { encoding: "utf8" }).trim();
   } catch {
     return "";
   }
@@ -16,7 +17,8 @@ function getGitConfig(key) {
 
 function getGlobalGitConfig(key) {
   try {
-    return execSync(`git config --global --get ${key}`, { encoding: "utf8" }).trim();
+    const gitBin = process.platform === "win32" ? "git.exe" : "git";
+    return execSync(`${gitBin} config --global --get ${key}`, { encoding: "utf8" }).trim();
   } catch {
     return "";
   }
