@@ -48,8 +48,9 @@ export async function setupRepo(repoUrl, username, pat) {
  * Build an authenticated HTTPS URL.
  */
 function buildAuthUrl(repoUrl, username, pat) {
-  // repoUrl: https://github.com/user/repo
-  // result:  https://username:pat@github.com/user/repo.git
+  if (!repoUrl.startsWith("http://") && !repoUrl.startsWith("https://")) {
+    return repoUrl;
+  }
   const urlObj = new URL(repoUrl.endsWith(".git") ? repoUrl : repoUrl + ".git");
   urlObj.username = username;
   urlObj.password = pat;
@@ -169,14 +170,28 @@ export async function cleanup(tempDir) {
  * @param {string} folderPath - Absolute path to the user's project folder.
  * @returns {Promise<boolean>} true if sync succeeded, false if skipped/failed.
  */
-export async function syncLocalRepo(folderPath) {
-  // Only proceed if this folder is actually a git repository.
+export async function syncLocalRepo(folderPath, repoUrl, username, pat) {
+  const localGit = simpleGit(folderPath);
   const gitDir = path.join(folderPath, ".git");
   const isGitRepo = await fs.pathExists(gitDir);
-  if (!isGitRepo) return false;
 
   try {
-    const localGit = simpleGit(folderPath);
+    if (!isGitRepo) {
+      await localGit.init();
+    }
+
+    // Configure/Update remote origin if credentials are provided
+    if (repoUrl && username && pat) {
+      const authUrl = buildAuthUrl(repoUrl, username, pat);
+      const remotes = await localGit.getRemotes(true);
+      const originRemote = remotes.find(r => r.name === "origin");
+
+      if (!originRemote) {
+        await localGit.addRemote("origin", authUrl);
+      } else if (originRemote.refs.push !== authUrl) {
+        await localGit.remote(["set-url", "origin", authUrl]);
+      }
+    }
 
     // Download latest remote refs — non-destructive.
     await localGit.fetch("origin");
