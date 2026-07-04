@@ -21,14 +21,12 @@ import {
   showProgress,
   showSummary,
   showError,
-  showFutureReminder,
   showInfo,
 } from "./display.js";
 
 import {
   collectInputs,
   askPAT,
-  askResumeOrFresh,
   askLargeProjectConfirm,
 } from "./prompts.js";
 
@@ -37,7 +35,6 @@ import { chunkCommits, getTotalCommitCount } from "./chunker.js";
 import { generateTimestamps, formatTimestamp } from "./timestamps.js";
 import { initMessageClient, generateMessage, delay, isAPIAvailable } from "./messages.js";
 import { setupRepo, copyFilesToTemp, createCommit, pushToRemote, cleanup, syncLocalRepo } from "./git.js";
-import { sessionExists, loadSession, saveSession, deleteSession } from "./session.js";
 
 /**
  * Compute MD5 hash of a file for comparison.
@@ -95,72 +92,23 @@ async function main() {
   let files;
   let binaryFiles;
   let chunks;
-  let isResuming = false;
+  // ──────────────────────────────────────────────
+  // Step 2: Collect inputs
+  // ──────────────────────────────────────────────
+  inputs = await collectInputs();
 
   // ──────────────────────────────────────────────
-  // Step 1: Check for existing session
+  // Step 3: Scan files
   // ──────────────────────────────────────────────
-  if (sessionExists()) {
-    const envPat = process.env.GITHUB_PAT;
-    let choice = "resume";
+  const scanResult = scanFiles(inputs.folderPath);
+  files = scanResult.files;
+  binaryFiles = scanResult.binaryFiles;
 
-    if (envPat && envPat.trim()) {
-      showInfo("Active session found. Auto-resuming using GITHUB_PAT from .env...");
-    } else {
-      choice = await askResumeOrFresh();
-    }
+  showScanSummary(scanResult.totalCount, scanResult.breakdown, binaryFiles.size);
 
-    if (choice === "resume") {
-      const session = loadSession();
-
-      if (!session) {
-        showError("Failed to load session file. Starting fresh.");
-        deleteSession();
-      } else {
-        showInfo(`Resuming session from ${session.lastRunAt || session.startedAt}`);
-        showInfo(`Completed ${session.completedDays}/${session.totalDays} days so far.`);
-        console.log();
-
-        // Re-prompt for PAT (never stored in session)
-        const pat = await askPAT();
-
-        inputs = {
-          folderPath: session.folderPath,
-          repoUrl: session.repoUrl,
-          username: session.username,
-          pat,
-          days: session.totalDays - session.completedDays,
-          direction: "future",
-        };
-
-        files = session.remainingFiles;
-        binaryFiles = new Set(session.binaryFilesList || []);
-        isResuming = true;
-      }
-    } else {
-      deleteSession();
-    }
-  }
-
-  // ──────────────────────────────────────────────
-  // Step 2: Collect inputs (if not resuming)
-  // ──────────────────────────────────────────────
-  if (!isResuming) {
-    inputs = await collectInputs();
-
-    // ──────────────────────────────────────────────
-    // Step 3: Scan files
-    // ──────────────────────────────────────────────
-    const scanResult = scanFiles(inputs.folderPath);
-    files = scanResult.files;
-    binaryFiles = scanResult.binaryFiles;
-
-    showScanSummary(scanResult.totalCount, scanResult.breakdown, binaryFiles.size);
-
-    if (scanResult.totalCount === 0) {
-      showError("No files found in the project folder. Nothing to do.");
-      process.exit(1);
-    }
+  if (scanResult.totalCount === 0) {
+    showError("No files found in the project folder. Nothing to do.");
+    process.exit(1);
   }
 
   // ──────────────────────────────────────────────
@@ -181,8 +129,8 @@ async function main() {
     process.exit(1);
   }
 
-  // Handle Incremental Mode comparison (only for new runs)
-  if (!isResuming && isIncremental) {
+  // Handle Incremental Mode comparison
+  if (isIncremental) {
     showInfo("Comparing local project files with remote repository...");
     const changedFiles = getChangedFiles(inputs.folderPath, tempDir, files);
     showInfo(`Found ${changedFiles.length} new or modified file(s) to commit.\n`);
@@ -206,16 +154,14 @@ async function main() {
     binaryFiles = updatedBinaryFiles;
   }
 
-  // Large project warning (only for fresh runs, based on the filtered file list)
-  if (!isResuming) {
-    if (files.length > 200) {
-      showLargeProjectWarning(files.length);
-      const proceed = await askLargeProjectConfirm();
-      if (!proceed) {
-        showInfo("Exiting. No changes were made.");
-        await cleanup(tempDir);
-        process.exit(0);
-      }
+  // Large project warning (based on the filtered file list)
+  if (files.length > 200) {
+    showLargeProjectWarning(files.length);
+    const proceed = await askLargeProjectConfirm();
+    if (!proceed) {
+      showInfo("Exiting. No changes were made.");
+      await cleanup(tempDir);
+      process.exit(0);
     }
   }
 
@@ -231,7 +177,7 @@ async function main() {
   // ──────────────────────────────────────────────
   // Step 5: Generate timestamps
   // ──────────────────────────────────────────────
-  const timestampedChunks = generateTimestamps(chunks, inputs.direction);
+  const timestampedChunks = generateTimestamps(chunks, inputs.startDate);
 
   // ──────────────────────────────────────────────
   // Step 6: Initialize AI client for commit messages
@@ -244,11 +190,7 @@ async function main() {
   const commitLog = [];
   let commitIndex = 0;
 
-  // If future mode, only process day 0 (today)
-  const chunksToProcess =
-    inputs.direction === "future" && !isResuming
-      ? timestampedChunks.slice(0, 1)
-      : timestampedChunks;
+  const chunksToProcess = timestampedChunks;
 
   // Pre-generate all commit messages in parallel
   const allCommits = chunksToProcess.flatMap((day) =>
@@ -326,9 +268,8 @@ async function main() {
   // Step 9: Push to remote
   // ──────────────────────────────────────────────
   console.log();
-  let pushedBranch = "main";
   try {
-    pushedBranch = await pushToRemote(git);
+    await pushToRemote(git);
   } catch (error) {
     showError(error.message);
     await cleanup(tempDir);
@@ -362,50 +303,6 @@ async function main() {
     log: commitLog,
   });
 
-  // ──────────────────────────────────────────────
-  // Step 12: Handle future mode session
-  // ──────────────────────────────────────────────
-  if (inputs.direction === "future") {
-    const processedDays = chunksToProcess.length;
-    const totalDaysOriginal = isResuming
-      ? (loadSession()?.totalDays || inputs.days + processedDays)
-      : inputs.days;
-    const completedSoFar = isResuming
-      ? (loadSession()?.completedDays || 0) + processedDays
-      : processedDays;
-    const remainingDays = totalDaysOriginal - completedSoFar;
-
-    if (remainingDays > 0) {
-      // Collect remaining files (files not yet committed today)
-      const committedFiles = new Set(
-        chunksToProcess.flatMap((day) =>
-          day.commits.flatMap((c) => c.files)
-        )
-      );
-      const remainingFiles = files.filter((f) => !committedFiles.has(f));
-
-      saveSession({
-        folderPath: inputs.folderPath,
-        repoUrl: inputs.repoUrl,
-        username: inputs.username,
-        totalDays: totalDaysOriginal,
-        completedDays: completedSoFar,
-        direction: "future",
-        remainingFiles,
-        binaryFilesList: [...binaryFiles],
-        startedAt: isResuming
-          ? (loadSession()?.startedAt || new Date().toISOString())
-          : new Date().toISOString(),
-        lastRunAt: new Date().toISOString(),
-      });
-
-      showFutureReminder(remainingDays);
-    } else {
-      // All days complete — clean up session
-      deleteSession();
-      showInfo("All days completed! Session file cleaned up.");
-    }
-  }
 }
 
 // Run
