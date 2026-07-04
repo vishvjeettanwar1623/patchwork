@@ -168,18 +168,7 @@ export function showWarning(message) {
 /**
  * Show a reminder for future mode.
  */
-export function showFutureReminder(remainingDays) {
-  console.log();
-  console.log(
-    YELLOW(
-      `  ⏰ ${BOLD(remainingDays)} day(s) remaining. Run PatchWork again tomorrow to continue.`
-    )
-  );
-  console.log(
-    DIM("     Your session has been saved to patchwork-session.json")
-  );
-  console.log();
-}
+
 
 /**
  * Show info message.
