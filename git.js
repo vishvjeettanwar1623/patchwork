@@ -70,9 +70,14 @@ export async function copyFilesToTemp(sourceDir, tempDir, files) {
     const src = path.join(sourceDir, file);
     const dest = path.join(tempDir, file);
 
-    // Ensure destination directory exists
-    await fs.ensureDir(path.dirname(dest));
-    await fs.copy(src, dest);
+    if (await fs.pathExists(src)) {
+      // Ensure destination directory exists
+      await fs.ensureDir(path.dirname(dest));
+      await fs.copy(src, dest);
+    } else {
+      // Mirror local deletion by removing the file in the temp directory if it exists
+      await fs.remove(dest);
+    }
   }
 }
 
@@ -86,9 +91,18 @@ export async function copyFilesToTemp(sourceDir, tempDir, files) {
  * @param {string} timestamp - ISO 8601 timestamp string.
  */
 export async function createCommit(git, tempDir, files, message, timestamp) {
-  // Stage only the specified files
+  // Stage only the specified files using force (-f) or git rm
   for (const file of files) {
-    await git.add(file);
+    const dest = path.join(tempDir, file);
+    if (await fs.pathExists(dest)) {
+      await git.add(["-f", file]);
+    } else {
+      try {
+        await git.rm(file);
+      } catch {
+        // If file is not tracked or already staged for deletion, ignore
+      }
+    }
   }
 
   // Set the author and committer date via environment variables

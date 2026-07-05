@@ -392,6 +392,12 @@ function generateSingleFileMessage(file, sourceDir) {
   const nameWithoutExt = path.basename(file, ext);
   const cleanName = nameWithoutExt.replace(/\.(test|spec)$/i, '');
 
+  // Check if file is deleted locally
+  const fullPath = path.join(sourceDir, file);
+  if (!fs.existsSync(fullPath)) {
+    return `chore: Remove ${base}`;
+  }
+
   if (baseLower === 'package.json' || baseLower === 'package-lock.json' || baseLower === 'yarn.lock' || baseLower === 'pnpm-lock.yaml') {
     return 'chore: Update project dependencies';
   }
@@ -410,9 +416,7 @@ function generateSingleFileMessage(file, sourceDir) {
   if (baseLower === 'tsconfig.json' || baseLower === 'jsconfig.json') {
     return 'chore: Update compiler configurations';
   }
-
   const category = getFileCategory(file);
-  const prefix = getConventionalPrefix(category);
 
   const symbol = extractFileSymbol(file, category, sourceDir);
 
@@ -506,6 +510,15 @@ function getConventionalPrefix(category) {
 export function buildFallbackMessage(files, sourceDir) {
   if (!files || files.length === 0) {
     return "chore: Update project files";
+  }
+
+  // Check if all files in this commit are deleted locally
+  const allDeleted = files.every(f => !fs.existsSync(path.join(sourceDir, f)));
+  if (allDeleted) {
+    if (files.length === 1) {
+      return `chore: Remove ${path.basename(files[0])}`;
+    }
+    return `chore: Remove ${files.length} project files`;
   }
 
   if (files.length === 1) {
