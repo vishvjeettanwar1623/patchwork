@@ -1,5 +1,4 @@
 import inquirer from "inquirer";
-import fs from "fs";
 import { execSync } from "child_process";
 import { showError } from "./display.js";
 
@@ -33,36 +32,6 @@ function normalizeRepoUrl(url) {
     trimmed = trimmed.replace("git@github.com:", "https://github.com/");
   }
   return trimmed;
-}
-
-/**
- * Prompt for the project folder path. Re-prompts on invalid path.
- */
-export async function askFolderPath() {
-  while (true) {
-    const { folderPath } = await inquirer.prompt([
-      {
-        type: "input",
-        name: "folderPath",
-        message: "Path to your project folder:",
-        validate(input) {
-          if (!input.trim()) return "Please enter a path.";
-          return true;
-        },
-      },
-    ]);
-
-    const resolved = fs.existsSync(folderPath.trim())
-      ? fs.realpathSync(folderPath.trim())
-      : null;
-
-    if (!resolved || !fs.statSync(resolved).isDirectory()) {
-      showError(`Folder not found: ${folderPath.trim()}`);
-      continue;
-    }
-
-    return resolved;
-  }
 }
 
 /**
@@ -165,22 +134,51 @@ export async function askDays() {
 }
 
 /**
- * Prompt for direction: past (backdate) or future (day by day).
+ * Prompt for commit scheduling type: default backdating or custom start date.
  */
-export async function askDirection() {
-  const { direction } = await inquirer.prompt([
+export async function askSchedule() {
+  const { scheduleType } = await inquirer.prompt([
     {
       type: "list",
-      name: "direction",
-      message: "Spread commits into:",
+      name: "scheduleType",
+      message: "Choose commit date scheduling:",
       choices: [
-        { name: "Past (backdate commits)", value: "past" },
-        { name: "Future (day by day from today)", value: "future" },
+        { name: "Backdate from today (Default)", value: "default" },
+        { name: "Custom start date", value: "custom" },
       ],
     },
   ]);
 
-  return direction;
+  return scheduleType;
+}
+
+/**
+ * Prompt for custom start date and validate it.
+ */
+export async function askCustomStartDate() {
+  const { startDateStr } = await inquirer.prompt([
+    {
+      type: "input",
+      name: "startDateStr",
+      message: "Enter start date (YYYY-MM-DD):",
+      validate(input) {
+        const trimmed = input.trim();
+        if (!trimmed) return "Please enter a date.";
+        const pattern = /^\d{4}-\d{2}-\d{2}$/;
+        if (!pattern.test(trimmed)) {
+          return "Invalid format. Expected: YYYY-MM-DD";
+        }
+        const dateObj = new Date(trimmed);
+        if (isNaN(dateObj.getTime())) {
+          return "Invalid date. Please enter a valid calendar date.";
+        }
+        return true;
+      },
+    },
+  ]);
+
+  // Set the time zone to local midnight
+  return new Date(startDateStr.trim() + "T00:00:00");
 }
 
 /**
@@ -197,25 +195,6 @@ export async function askLargeProjectConfirm() {
   ]);
 
   return proceed;
-}
-
-/**
- * Prompt for session resume or fresh start.
- */
-export async function askResumeOrFresh() {
-  const { choice } = await inquirer.prompt([
-    {
-      type: "list",
-      name: "choice",
-      message: "A previous PatchWork session was found. What would you like to do?",
-      choices: [
-        { name: "Resume previous session", value: "resume" },
-        { name: "Start fresh", value: "fresh" },
-      ],
-    },
-  ]);
-
-  return choice;
 }
 
 /**
@@ -252,9 +231,21 @@ export async function collectInputs() {
   // 4. Load PAT
   const pat = await askPAT();
 
-  // 5. Ask for days and direction
+  // 5. Ask for days
   const days = await askDays();
-  const direction = await askDirection();
 
-  return { folderPath, repoUrl, username, pat, days, direction };
+  // 6. Ask for schedule type
+  const scheduleType = await askSchedule();
+  let startDate;
+
+  if (scheduleType === "custom") {
+    startDate = await askCustomStartDate();
+  } else {
+    // Default: Backdate from today
+    startDate = new Date();
+    startDate.setHours(0, 0, 0, 0);
+    startDate.setDate(startDate.getDate() - (days - 1));
+  }
+
+  return { folderPath, repoUrl, username, pat, days, startDate };
 }
