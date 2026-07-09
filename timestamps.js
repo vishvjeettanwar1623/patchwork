@@ -5,26 +5,17 @@
  * Commits are loosely clustered with random gaps.
  *
  * @param {Array<{ dayIndex: number, commits: Array<{ files: string[] }> }>} chunks
- * @param {"past" | "future"} direction
+ * @param {Date} startDate - The starting date of the commit sequence.
  * @returns {Array<{ dayIndex: number, commits: Array<{ files: string[], timestamp: string }> }>}
  */
-export function generateTimestamps(chunks, direction) {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  const totalDays = chunks.length;
+export function generateTimestamps(chunks, startDate) {
+  const baseDate = new Date(startDate);
+  baseDate.setHours(0, 0, 0, 0);
 
   return chunks.map((day) => {
     // Calculate the actual date for this day
-    const date = new Date(today);
-
-    if (direction === "past") {
-      // Day 0 = today - (totalDays - 1), last day = today
-      date.setDate(date.getDate() - (totalDays - 1 - day.dayIndex));
-    } else {
-      // Day 0 = today, last day = today + (totalDays - 1)
-      date.setDate(date.getDate() + day.dayIndex);
-    }
+    const date = new Date(baseDate);
+    date.setDate(date.getDate() + day.dayIndex);
 
     // Generate timestamps for all commits on this day
     const timestamps = generateDayTimestamps(date, day.commits.length);
