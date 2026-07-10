@@ -12,7 +12,7 @@ import ora from "ora";
  * @param {string} pat - GitHub PAT.
  * @returns {Promise<{ tempDir: string, git: SimpleGit }>}
  */
-export async function setupRepo(repoUrl, username, pat) {
+export async function setupRepo(repoUrl, username, pat, email) {
   // Create temp directory
   const tempDir = path.join(os.tmpdir(), `patchwork-${Date.now()}`);
   await fs.ensureDir(tempDir);
@@ -39,7 +39,7 @@ export async function setupRepo(repoUrl, username, pat) {
 
   // Configure user identity
   await git.addConfig("user.name", username);
-  await git.addConfig("user.email", `${username}@users.noreply.github.com`);
+  await git.addConfig("user.email", email);
 
   return { tempDir, git, isIncremental };
 }
@@ -194,25 +194,27 @@ export async function syncLocalRepo(folderPath, repoUrl, username, pat) {
       await localGit.init();
     }
 
-    // Configure/Update remote origin if credentials are provided
-    if (repoUrl && username && pat) {
-      const authUrl = buildAuthUrl(repoUrl, username, pat);
+    // Configure remote origin using the clean repo URL (no credentials) if not present
+    if (repoUrl) {
       const remotes = await localGit.getRemotes(true);
       const originRemote = remotes.find(r => r.name === "origin");
 
       if (!originRemote) {
-        await localGit.addRemote("origin", authUrl);
-      } else if (originRemote.refs.push !== authUrl) {
-        await localGit.remote(["set-url", "origin", authUrl]);
+        await localGit.addRemote("origin", repoUrl);
       }
     }
 
-    // Download latest remote refs — non-destructive.
-    await localGit.fetch("origin");
-
-    // Snap local branch to match remote exactly.
-    // "origin" follows origin/HEAD, so this works for both master and main.
-    await localGit.reset(["--hard", "origin"]);
+    if (repoUrl && username && pat) {
+      // Fetch on-the-fly from the authenticated URL to avoid saving credentials in git config
+      const authUrl = buildAuthUrl(repoUrl, username, pat);
+      await localGit.fetch(authUrl);
+      // Snap current branch to match the fetched remote state exactly
+      await localGit.reset(["--hard", "FETCH_HEAD"]);
+    } else {
+      // Fallback if credentials are not provided
+      await localGit.fetch("origin");
+      await localGit.reset(["--hard", "origin"]);
+    }
 
     return true;
   } catch {

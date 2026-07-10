@@ -36,6 +36,25 @@ import { generateTimestamps, formatTimestamp } from "./timestamps.js";
 import { initMessageClient, generateMessage, delay, isAPIAvailable } from "./messages.js";
 import { setupRepo, copyFilesToTemp, createCommit, pushToRemote, cleanup, syncLocalRepo } from "./git.js";
 
+let globalPat = null;
+
+/**
+ * Display a sanitized error message to prevent PAT or credential leakage.
+ */
+function showSanitizedError(message) {
+  let cleanMsg = String(message);
+
+  if (globalPat && globalPat.length > 5) {
+    const escapedPat = globalPat.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    cleanMsg = cleanMsg.replace(new RegExp(escapedPat, "g"), "[REDACTED_PAT]");
+  }
+
+  // Redact credentials in URLs (e.g. https://username:password@github.com)
+  cleanMsg = cleanMsg.replace(/(https?:\/\/)[^@\s]+@/gi, "$1");
+
+  showError(cleanMsg);
+}
+
 /**
  * Compute MD5 hash of a file for comparison.
  * Normalizes line endings for text files to avoid false positives on Windows.
@@ -96,6 +115,7 @@ async function main() {
   // Step 2: Collect inputs
   // ──────────────────────────────────────────────
   inputs = await collectInputs();
+  globalPat = inputs.pat;
 
   // ──────────────────────────────────────────────
   // Step 3: Scan files
@@ -107,7 +127,7 @@ async function main() {
   showScanSummary(scanResult.totalCount, scanResult.breakdown, binaryFiles.size);
 
   if (scanResult.totalCount === 0) {
-    showError("No files found in the project folder. Nothing to do.");
+    showSanitizedError("No files found in the project folder. Nothing to do.");
     process.exit(1);
   }
 
@@ -119,13 +139,13 @@ async function main() {
   let isIncremental = false;
 
   try {
-    const setup = await setupRepo(inputs.repoUrl, inputs.username, inputs.pat);
+    const setup = await setupRepo(inputs.repoUrl, inputs.username, inputs.pat, inputs.email);
     tempDir = setup.tempDir;
     git = setup.git;
     isIncremental = setup.isIncremental;
     showInfo(`Working directory: ${tempDir}\n`);
   } catch (error) {
-    showError(`Failed to initialize git repo: ${error.message}`);
+    showSanitizedError(`Failed to initialize git repo: ${error.message}`);
     process.exit(1);
   }
 
@@ -226,7 +246,7 @@ async function main() {
       console.log();
     } catch (error) {
       spinner.fail("  Failed to generate commit messages!");
-      showError(error.message);
+      showSanitizedError(error.message);
       await cleanup(tempDir);
       process.exit(1);
     }
@@ -259,7 +279,7 @@ async function main() {
       }
     }
   } catch (error) {
-    showError(`Failed during commit creation: ${error.message}`);
+    showSanitizedError(`Failed during commit creation: ${error.message}`);
     await cleanup(tempDir);
     process.exit(1);
   }
@@ -271,7 +291,7 @@ async function main() {
   try {
     await pushToRemote(git);
   } catch (error) {
-    showError(error.message);
+    showSanitizedError(error.message);
     await cleanup(tempDir);
     process.exit(1);
   }
@@ -307,6 +327,6 @@ async function main() {
 
 // Run
 main().catch((error) => {
-  showError(`Unexpected error: ${error.message}`);
+  showSanitizedError(`Unexpected error: ${error.message}`);
   process.exit(1);
 });
