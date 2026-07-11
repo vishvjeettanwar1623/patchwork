@@ -182,6 +182,30 @@ export async function askCustomStartDate() {
 }
 
 /**
+ * Prompt for GitHub email address.
+ */
+export async function askEmail() {
+  const { email } = await inquirer.prompt([
+    {
+      type: "input",
+      name: "email",
+      message: "GitHub email address (for commit graph attribution):",
+      validate(input) {
+        const trimmed = input.trim();
+        if (!trimmed) return "Email cannot be empty.";
+        const pattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!pattern.test(trimmed)) {
+          return "Please enter a valid email address.";
+        }
+        return true;
+      },
+    },
+  ]);
+
+  return email.trim();
+}
+
+/**
  * Prompt for large project confirmation.
  */
 export async function askLargeProjectConfirm() {
@@ -231,6 +255,21 @@ export async function collectInputs() {
   // 4. Load PAT
   const pat = await askPAT();
 
+  // 4b. Auto-detect or load GitHub email
+  let email = process.env.GITHUB_EMAIL;
+  if (email && email.trim()) {
+    console.log(`\x1b[32m✔\x1b[39m GitHub email: \x1b[36m${email.trim()}\x1b[39m \x1b[90m[Loaded from .env]\x1b[39m`);
+    email = email.trim();
+  } else {
+    email = getGitConfig("user.email") || getGlobalGitConfig("user.email");
+    if (email && email.trim()) {
+      console.log(`\x1b[32m✔\x1b[39m GitHub email: \x1b[36m${email.trim()}\x1b[39m \x1b[90m[Auto-detected]\x1b[39m`);
+      email = email.trim();
+    } else {
+      email = await askEmail();
+    }
+  }
+
   // 5. Ask for days
   const days = await askDays();
 
@@ -247,5 +286,5 @@ export async function collectInputs() {
     startDate.setDate(startDate.getDate() - (days - 1));
   }
 
-  return { folderPath, repoUrl, username, pat, days, startDate };
+  return { folderPath, repoUrl, username, email, pat, days, startDate };
 }
