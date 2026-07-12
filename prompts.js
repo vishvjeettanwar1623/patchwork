@@ -153,32 +153,68 @@ export async function askSchedule() {
 }
 
 /**
- * Prompt for custom start date and validate it.
+ * Helper to parse a relative or absolute date string.
+ * Supports: 'today', 'yesterday', '-N', 'N days ago', and 'YYYY-MM-DD'.
+ * Returns a local Date object set to local midnight, or null if invalid.
+ *
+ * @param {string} input
+ * @returns {Date|null}
+ */
+function parseRelativeDate(input) {
+  const trimmed = input.trim().toLowerCase();
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+
+  if (trimmed === "today") {
+    return d;
+  }
+  if (trimmed === "yesterday") {
+    d.setDate(d.getDate() - 1);
+    return d;
+  }
+
+  // Matches numbers like -5, - 5, or expressions like "5 days ago"
+  const relativeMatch = trimmed.match(/^(-?\s*\d+)(?:\s*days?\s*ago)?$/);
+  if (relativeMatch) {
+    const offset = parseInt(relativeMatch[1].replace(/\s+/g, ""), 10);
+    const daysAgo = Math.abs(offset);
+    d.setDate(d.getDate() - daysAgo);
+    return d;
+  }
+
+  // Matches standard YYYY-MM-DD format
+  const pattern = /^\d{4}-\d{2}-\d{2}$/;
+  if (pattern.test(trimmed)) {
+    const customDate = new Date(trimmed + "T00:00:00");
+    if (!isNaN(customDate.getTime())) {
+      return customDate;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Prompt for custom start date and validate it. Supports relative parsing.
  */
 export async function askCustomStartDate() {
   const { startDateStr } = await inquirer.prompt([
     {
       type: "input",
       name: "startDateStr",
-      message: "Enter start date (YYYY-MM-DD):",
+      message: "Enter start date (YYYY-MM-DD, 'today', 'yesterday', or '-N' for days ago):",
+      default: "today",
       validate(input) {
-        const trimmed = input.trim();
-        if (!trimmed) return "Please enter a date.";
-        const pattern = /^\d{4}-\d{2}-\d{2}$/;
-        if (!pattern.test(trimmed)) {
-          return "Invalid format. Expected: YYYY-MM-DD";
-        }
-        const dateObj = new Date(trimmed);
-        if (isNaN(dateObj.getTime())) {
-          return "Invalid date. Please enter a valid calendar date.";
+        const parsed = parseRelativeDate(input);
+        if (!parsed) {
+          return "Invalid format. Expected: YYYY-MM-DD, 'today', 'yesterday', or '-N' for days ago.";
         }
         return true;
       },
     },
   ]);
 
-  // Set the time zone to local midnight
-  return new Date(startDateStr.trim() + "T00:00:00");
+  return parseRelativeDate(startDateStr);
 }
 
 /**
