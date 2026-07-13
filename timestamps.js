@@ -78,10 +78,33 @@ function generateDayTimestamps(date, count) {
     const ts = new Date(date);
     ts.setHours(hours, minutes, seconds, 0);
 
-    timestamps.push(ts.toISOString());
+    timestamps.push(toLocalISOString(ts));
   }
 
   return timestamps;
+}
+
+/**
+ * Formats a Date object to an ISO 8601 string preserving the local timezone offset.
+ *
+ * @param {Date} date
+ * @returns {string} e.g. "2026-07-16T21:30:00+05:30"
+ */
+function toLocalISOString(date) {
+  const pad = (num) => String(num).padStart(2, '0');
+  const year = date.getFullYear();
+  const month = pad(date.getMonth() + 1);
+  const day = pad(date.getDate());
+  const hours = pad(date.getHours());
+  const minutes = pad(date.getMinutes());
+  const seconds = pad(date.getSeconds());
+  
+  const timezoneOffset = -date.getTimezoneOffset();
+  const sign = timezoneOffset >= 0 ? '+' : '-';
+  const offsetHours = pad(Math.floor(Math.abs(timezoneOffset) / 60));
+  const offsetMinutes = pad(Math.abs(timezoneOffset) % 60);
+  
+  return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}${sign}${offsetHours}:${offsetMinutes}`;
 }
 
 /**
@@ -92,18 +115,21 @@ function generateDayTimestamps(date, count) {
  */
 export function formatTimestamp(isoString) {
   const d = new Date(isoString);
-
-  const date = d.toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-  });
-
-  const time = d.toLocaleTimeString("en-US", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: true,
-  });
-
-  return { date, time };
+  const pad = (num) => String(num).padStart(2, '0');
+  
+  const year = d.getFullYear();
+  const month = pad(d.getMonth() + 1);
+  const day = pad(d.getDate());
+  
+  let hours = d.getHours();
+  const minutes = pad(d.getMinutes());
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+  hours = hours % 12;
+  hours = hours ? hours : 12; // convert hour '0' to '12'
+  const formattedHours = pad(hours);
+  
+  return {
+    date: `${year}-${month}-${day}`,
+    time: `${formattedHours}:${minutes} ${ampm}`
+  };
 }
