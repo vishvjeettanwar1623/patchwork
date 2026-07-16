@@ -11,6 +11,7 @@ let apiAvailable = false;
 let warnedOnce = false;
 
 const FREE_MODELS = [
+  "nvidia/nemotron-3-ultra-550b-a55b:free",
   "openrouter/free",
   "meta-llama/llama-3.3-70b-instruct:free",
 ];
@@ -129,6 +130,66 @@ export async function generateMessage(files, sourceDir) {
   }
 }
 
+/**
+ * Extract up to 8 significant symbols (classes, functions, constants) from a file.
+ *
+ * @param {string} fullPath - Absolute file path.
+ * @param {string} category - File category.
+ * @returns {string[]} An array of extracted symbols.
+ */
+function extractFileSymbols(fullPath, category) {
+  if (!fs.existsSync(fullPath)) return [];
+  try {
+    if (category === "docs") {
+      const content = fs.readFileSync(fullPath, "utf8");
+      const lines = content.split("\n");
+      const headings = [];
+      for (let i = 0; i < Math.min(lines.length, 100); i++) {
+        const line = lines[i].trim();
+        const match = line.match(/^##?\s+(.+)$/);
+        if (match) {
+          headings.push(
+            match[1]
+              .replace(/[\[\]]/g, "")
+              .replace(/\([^)]*\)/g, "")
+              .trim()
+          );
+        }
+      }
+      return [...new Set(headings)].slice(0, 8);
+    } else if (category === "source" || category === "component") {
+      const content = fs.readFileSync(fullPath, "utf8");
+      const lines = content.split("\n").slice(0, 150);
+      const textToScan = lines.join("\n");
+      const symbols = [];
+
+      // Match classes
+      const classRegex = /(?:export\s+default\s+|export\s+)?class\s+([A-Za-z0-9_]+)/g;
+      let match;
+      while ((match = classRegex.exec(textToScan)) !== null) {
+        symbols.push(match[1]);
+      }
+
+      // Match standard functions
+      const funcRegex = /(?:export\s+default\s+|export\s+)?function\s+([A-Za-z0-9_]+)/g;
+      while ((match = funcRegex.exec(textToScan)) !== null) {
+        symbols.push(match[1]);
+      }
+
+      // Match constant arrow functions (export const foo = () => ...)
+      const constRegex = /export\s+const\s+([A-Za-z0-9_]+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z0-9_]+)\s*=>/g;
+      while ((match = constRegex.exec(textToScan)) !== null) {
+        symbols.push(match[1]);
+      }
+
+      return [...new Set(symbols)].slice(0, 8);
+    }
+  } catch {
+    // Ignore read errors
+  }
+  return [];
+}
+
 let clientIndex = 0;
 
 /**
@@ -136,25 +197,40 @@ let clientIndex = 0;
  * Rotates clients and falls back to alternative free models on error.
  */
 async function callAPI(files, sourceDir) {
-  // Build the user content: filenames + first 30 lines of text files
-  let content = "Files in this commit:\n";
+  // 1. Retrieve project info from package.json
+  let projectInfo = "";
+  try {
+    const pkgPath = path.join(sourceDir, "package.json");
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+      projectInfo = `Project: ${pkg.name || "unknown"} - ${pkg.description || ""}\n`;
+    }
+  } catch {
+    // Ignore reading error
+  }
+
+  // 2. Build files metadata list
+  let content = projectInfo ? `${projectInfo}\nFiles in this commit:\n` : "Files in this commit:\n";
 
   for (const file of files) {
-    content += `\n--- ${file} ---\n`;
+    content += `\n- ${file}\n`;
 
     if (isBinaryFile(file)) {
-      content += "(binary file)\n";
+      content += "  Type: binary file\n";
       continue;
     }
 
-    // Read first 30 lines of text files
+    const category = getFileCategory(file);
+    content += `  Type: ${category}\n`;
+
     try {
       const fullPath = path.join(sourceDir, file);
-      const text = fs.readFileSync(fullPath, "utf-8");
-      const lines = text.split("\n").slice(0, 30);
-      content += lines.join("\n") + "\n";
+      const symbols = extractFileSymbols(fullPath, category);
+      if (symbols.length > 0) {
+        content += `  Extracted symbols/headings: ${symbols.join(", ")}\n`;
+      }
     } catch {
-      content += "(unable to read file)\n";
+      // Ignore symbol extraction error
     }
   }
 
