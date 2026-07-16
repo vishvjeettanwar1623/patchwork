@@ -163,20 +163,20 @@ function extractFileSymbols(fullPath, category) {
       const textToScan = lines.join("\n");
       const symbols = [];
 
-      // Match classes
+     
       const classRegex = /(?:export\s+default\s+|export\s+)?class\s+([A-Za-z0-9_]+)/g;
       let match;
       while ((match = classRegex.exec(textToScan)) !== null) {
         symbols.push(match[1]);
       }
 
-      // Match standard functions
+      
       const funcRegex = /(?:export\s+default\s+|export\s+)?function\s+([A-Za-z0-9_]+)/g;
       while ((match = funcRegex.exec(textToScan)) !== null) {
         symbols.push(match[1]);
       }
 
-      // Match constant arrow functions (export const foo = () => ...)
+    
       const constRegex = /export\s+const\s+([A-Za-z0-9_]+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z0-9_]+)\s*=>/g;
       while ((match = constRegex.exec(textToScan)) !== null) {
         symbols.push(match[1]);
