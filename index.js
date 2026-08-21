@@ -18,6 +18,7 @@ import {
   showScanSummary,
   showLargeProjectWarning,
   showCommitPlan,
+  showTimelinePreview,
   showProgress,
   showSummary,
   showError,
@@ -26,15 +27,25 @@ import {
 
 import {
   collectInputs,
-  askPAT,
   askLargeProjectConfirm,
+  askProceedWithCommits,
 } from "./prompts.js";
 
 import { scanFiles, isBinaryFile } from "./scanner.js";
 import { chunkCommits, getTotalCommitCount } from "./chunker.js";
+import { selectProgressiveFiles } from "./progressive.js";
 import { generateTimestamps, formatTimestamp } from "./timestamps.js";
 import { initMessageClient, generateMessage, delay, isAPIAvailable } from "./messages.js";
-import { setupRepo, copyFilesToTemp, createCommit, pushToRemote, cleanup, syncLocalRepo } from "./git.js";
+import {
+  setupRepo,
+  setupLocalRepo,
+  copyFilesToTemp,
+  createCommit,
+  pushToRemote,
+  cleanup,
+  syncLocalRepo,
+  syncLocalDirectoryGit,
+} from "./git.js";
 
 let globalPat = null;
 
@@ -111,14 +122,15 @@ async function main() {
   let files;
   let binaryFiles;
   let chunks;
+
   // ──────────────────────────────────────────────
-  // Step 2: Collect inputs
+  // Step 1: Collect inputs & options
   // ──────────────────────────────────────────────
   inputs = await collectInputs();
   globalPat = inputs.pat;
 
   // ──────────────────────────────────────────────
-  // Step 3: Scan files
+  // Step 2: Scan files
   // ──────────────────────────────────────────────
   const scanResult = scanFiles(inputs.folderPath);
   files = scanResult.files;
@@ -132,24 +144,32 @@ async function main() {
   }
 
   // ──────────────────────────────────────────────
-  // Step 7: Setup git repo in temp directory (Moved up)
+  // Step 3: Setup git repo in temp working directory
   // ──────────────────────────────────────────────
   let tempDir;
   let git;
   let isIncremental = false;
 
   try {
-    const setup = await setupRepo(inputs.repoUrl, inputs.username, inputs.pat, inputs.email);
-    tempDir = setup.tempDir;
-    git = setup.git;
-    isIncremental = setup.isIncremental;
-    showInfo(`Working directory: ${tempDir}\n`);
+    if (inputs.isLocalMode) {
+      const setup = await setupLocalRepo(inputs.folderPath, inputs.username, inputs.email);
+      tempDir = setup.tempDir;
+      git = setup.git;
+      isIncremental = false;
+      showInfo(`Initialized local workspace in: ${tempDir}\n`);
+    } else {
+      const setup = await setupRepo(inputs.repoUrl, inputs.username, inputs.pat, inputs.email);
+      tempDir = setup.tempDir;
+      git = setup.git;
+      isIncremental = setup.isIncremental;
+      showInfo(`Working directory: ${tempDir}\n`);
+    }
   } catch (error) {
     showSanitizedError(`Failed to initialize git repo: ${error.message}`);
     process.exit(1);
   }
 
-  // Handle Incremental Mode comparison
+  // Handle Incremental Mode comparison (Remote mode only)
   if (isIncremental) {
     showInfo("Comparing local project files with remote repository...");
     const changedFiles = getChangedFiles(inputs.folderPath, tempDir, files);
@@ -174,7 +194,7 @@ async function main() {
     binaryFiles = updatedBinaryFiles;
   }
 
-  // Large project warning (based on the filtered file list)
+  // Large project warning
   if (files.length > 200) {
     showLargeProjectWarning(files.length);
     const proceed = await askLargeProjectConfirm();
@@ -186,147 +206,12 @@ async function main() {
   }
 
   // ──────────────────────────────────────────────
-  // Step 4: Chunk commits
+  // Step 4: Progressive Evolution Analysis & Chunking
   // ──────────────────────────────────────────────
-  chunks = chunkCommits(files, inputs.days);
-  showCommitPlan(chunks);
-
-  const totalCommits = getTotalCommitCount(chunks);
-  showInfo(`Total commits to create: ${totalCommits}\n`);
-
-  // ──────────────────────────────────────────────
-  // Step 5: Generate timestamps
-  // ──────────────────────────────────────────────
-  const timestampedChunks = generateTimestamps(chunks, inputs.startDate);
-
-  // ──────────────────────────────────────────────
-  // Step 6: Initialize AI client for commit messages
-  // ──────────────────────────────────────────────
-  initMessageClient();
-
-  // ──────────────────────────────────────────────
-  // Step 8: Create commits
-  // ──────────────────────────────────────────────
-  const commitLog = [];
-  let commitIndex = 0;
-
-  const chunksToProcess = timestampedChunks;
-
-  // Pre-generate all commit messages in parallel
-  const allCommits = chunksToProcess.flatMap((day) =>
-    day.commits.map((commit) => ({ day, commit }))
-  );
-
-  const totalCommitsToCreate = allCommits.length;
-
-  if (totalCommitsToCreate > 0) {
-    const useAI = isAPIAvailable();
-    const spinnerText = useAI ? "  Generating AI commit messages..." : "  Generating local commit messages...";
-    const spinner = ora({
-      text: spinnerText,
-      color: "cyan",
-    }).start();
-
-    try {
-      // Generate messages sequentially.
-      // If using AI, we add a 3s gap between requests to avoid OpenRouter free tier rate limits (20 req/min).
-      // If using local generation, we do not delay.
-      for (let idx = 0; idx < allCommits.length; idx++) {
-        const { commit } = allCommits[idx];
-        if (useAI && idx > 0) {
-          await delay(3000);
-        }
-        commit.message = await generateMessage(commit.files, inputs.folderPath);
-        const progressLabel = useAI ? "Generating AI commit messages..." : "Generating local commit messages...";
-        spinner.text = `  ${progressLabel} (${idx + 1}/${allCommits.length})`;
-      }
-
-      const succeedText = useAI ? "  Generated all AI commit messages!" : "  Generated all local commit messages!";
-      spinner.succeed(succeedText);
-      console.log();
-    } catch (error) {
-      spinner.fail("  Failed to generate commit messages!");
-      showSanitizedError(error.message);
-      await cleanup(tempDir);
-      process.exit(1);
+  let progressiveFiles = new Set();
+  if (inputs.enableProgressive) {
+    progressiveFiles = selectProgressiveFiles(files, inputs.folderPath, inputs.days);
+    if (progressiveFiles.size > 0) {
+      showInfo(`Selected ${progressiveFiles.size} complex file(s) for progressive multi-pass commits (scaffold → complete).`);
     }
   }
-
-  try {
-    for (const day of chunksToProcess) {
-      for (const commit of day.commits) {
-        commitIndex++;
-
-        // Message is pre-generated
-        const message = commit.message || "Update project files";
-
-        // Copy files to temp directory
-        await copyFilesToTemp(inputs.folderPath, tempDir, commit.files);
-
-        // Create the commit with the custom timestamp
-        await createCommit(git, tempDir, commit.files, message, commit.timestamp);
-
-        // Track for summary
-        const { date, time } = formatTimestamp(commit.timestamp);
-        commitLog.push({
-          date,
-          time,
-          message,
-          fileCount: commit.files.length,
-        });
-
-        showProgress(commitIndex, totalCommitsToCreate, message);
-      }
-    }
-  } catch (error) {
-    showSanitizedError(`Failed during commit creation: ${error.message}`);
-    await cleanup(tempDir);
-    process.exit(1);
-  }
-
-  // ──────────────────────────────────────────────
-  // Step 9: Push to remote
-  // ──────────────────────────────────────────────
-  console.log();
-  try {
-    await pushToRemote(git);
-  } catch (error) {
-    showSanitizedError(error.message);
-    await cleanup(tempDir);
-    process.exit(1);
-  }
-
-  // ──────────────────────────────────────────────
-  // Step 10: Cleanup temp directory
-  // ──────────────────────────────────────────────
-  await cleanup(tempDir);
-
-  // ──────────────────────────────────────────────
-  // Step 10b: Sync local git repo so editors reflect the push
-  // ──────────────────────────────────────────────
-  const synced = await syncLocalRepo(inputs.folderPath, inputs.repoUrl, inputs.username, inputs.pat);
-  if (synced) {
-    showInfo("Local git synced — your editor's Source Control is now up to date. ✔");
-  }
-
-  // ──────────────────────────────────────────────
-  // Step 11: Show summary
-  // ──────────────────────────────────────────────
-  const dateRange =
-    commitLog.length > 0
-      ? `${commitLog[0].date} → ${commitLog[commitLog.length - 1].date}`
-      : "N/A";
-
-  showSummary({
-    totalCommits: commitLog.length,
-    dateRange,
-    log: commitLog,
-  });
-
-}
-
-// Run
-main().catch((error) => {
-  showSanitizedError(`Unexpected error: ${error.message}`);
-  process.exit(1);
-});

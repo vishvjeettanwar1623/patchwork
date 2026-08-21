@@ -96,6 +96,57 @@ export function showCommitPlan(chunks) {
 }
 
 /**
+ * Show detailed timeline preview (Dry-Run / Preview Mode).
+ */
+export function showTimelinePreview(timestampedChunks, isLocalMode = false) {
+  console.log();
+  console.log(BOLD(CYAN("  🔍 Interactive Commit Timeline Preview")));
+  console.log(DIM("  ═════════════════════════════════════════════════════════════════════"));
+  if (isLocalMode) {
+    console.log(YELLOW("  Mode: Local-Only (Offline Git repository creation — no remote push)"));
+  } else {
+    console.log(CYAN("  Mode: Remote Push (GitHub sync)"));
+  }
+  console.log(DIM("  ─────────────────────────────────────────────────────────────────────"));
+
+  for (const day of timestampedChunks) {
+    const firstTimestamp = day.commits[0]?.timestamp;
+    const dateStr = firstTimestamp ? new Date(firstTimestamp).toISOString().split("T")[0] : `Day ${day.dayIndex + 1}`;
+    
+    console.log();
+    console.log(`  📅 ${BOLD(WHITE(`Day ${day.dayIndex + 1}`))} ${DIM(`(${dateStr})`)} — ${GREEN(`${day.commits.length} commit(s)`)}`);
+
+    for (let cIdx = 0; cIdx < day.commits.length; cIdx++) {
+      const commit = day.commits[cIdx];
+      const isLastCommit = cIdx === day.commits.length - 1;
+      const branchPrefix = isLastCommit ? "  └──" : "  ├──";
+      const subPrefix = isLastCommit ? "     " : "  │  ";
+
+      const timeStr = commit.timestamp ? new Date(commit.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+      const message = commit.message || "Commit changes";
+
+      console.log(`${branchPrefix} ${YELLOW(timeStr)} ${BOLD(WHITE(message))}`);
+
+      // List files
+      for (const file of commit.files) {
+        const stage = commit.fileStages?.[file];
+        let stageTag = "";
+        if (stage === "scaffold") {
+          stageTag = ` ${CYAN("[pass 1: scaffold]")}`;
+        } else if (stage === "final" && commit.fileStages) {
+          stageTag = ` ${GREEN("[pass 2: complete]")}`;
+        }
+        console.log(`${subPrefix}   ${DIM("•")} ${DIM(file)}${stageTag}`);
+      }
+    }
+  }
+
+  console.log();
+  console.log(DIM("  ═════════════════════════════════════════════════════════════════════"));
+  console.log();
+}
+
+/**
  * Show live progress during commit creation.
  */
 export function showProgress(current, total, message) {
