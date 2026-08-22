@@ -215,3 +215,163 @@ async function main() {
       showInfo(`Selected ${progressiveFiles.size} complex file(s) for progressive multi-pass commits (scaffold → complete).`);
     }
   }
+
+  chunks = chunkCommits(files, inputs.days, progressiveFiles);
+  showCommitPlan(chunks);
+
+  const totalCommits = getTotalCommitCount(chunks);
+  showInfo(`Total commits to create: ${totalCommits}\n`);
+
+  // ──────────────────────────────────────────────
+  // Step 5: Generate timestamps
+  // ──────────────────────────────────────────────
+  const timestampedChunks = generateTimestamps(chunks, inputs.startDate);
+
+  // ──────────────────────────────────────────────
+  // Step 6: Initialize AI client for commit messages
+  // ──────────────────────────────────────────────
+  initMessageClient();
+
+  // ──────────────────────────────────────────────
+  // Step 7: Pre-generate all commit messages
+  // ──────────────────────────────────────────────
+  const chunksToProcess = timestampedChunks;
+  const allCommits = chunksToProcess.flatMap((day) =>
+    day.commits.map((commit) => ({ day, commit }))
+  );
+  const totalCommitsToCreate = allCommits.length;
+
+  if (totalCommitsToCreate > 0) {
+    const useAI = isAPIAvailable();
+    const spinnerText = useAI ? "  Generating AI commit messages..." : "  Generating local commit messages...";
+    const spinner = ora({
+      text: spinnerText,
+      color: "cyan",
+    }).start();
+
+    try {
+      for (let idx = 0; idx < allCommits.length; idx++) {
+        const { commit } = allCommits[idx];
+        if (useAI && idx > 0) {
+          await delay(3000);
+        }
+        commit.message = await generateMessage(commit.files, inputs.folderPath, commit.fileStages || {});
+        const progressLabel = useAI ? "Generating AI commit messages..." : "Generating local commit messages...";
+        spinner.text = `  ${progressLabel} (${idx + 1}/${allCommits.length})`;
+      }
+
+      const succeedText = useAI ? "  Generated all AI commit messages!" : "  Generated all local commit messages!";
+      spinner.succeed(succeedText);
+      console.log();
+    } catch (error) {
+      spinner.fail("  Failed to generate commit messages!");
+      showSanitizedError(error.message);
+      await cleanup(tempDir);
+      process.exit(1);
+    }
+  }
+
+  // ──────────────────────────────────────────────
+  // Step 8: Timeline Preview & Dry-Run Mode
+  // ──────────────────────────────────────────────
+  showTimelinePreview(timestampedChunks, inputs.isLocalMode);
+
+  if (inputs.isDryRun) {
+    showInfo("Dry-run preview complete. No Git commits were created.");
+    await cleanup(tempDir);
+    process.exit(0);
+  }
+
+  const proceedWithExecution = await askProceedWithCommits();
+  if (!proceedWithExecution) {
+    showInfo("Operation cancelled by user. No Git commits were created.");
+    await cleanup(tempDir);
+    process.exit(0);
+  }
+
+  // ──────────────────────────────────────────────
+  // Step 9: Create commits in working repository
+  // ──────────────────────────────────────────────
+  const commitLog = [];
+  let commitIndex = 0;
+
+  try {
+    for (const day of chunksToProcess) {
+      for (const commit of day.commits) {
+        commitIndex++;
+
+        const message = commit.message || "Update project files";
+
+        // Copy files with stage awareness (scaffold vs final)
+        await copyFilesToTemp(inputs.folderPath, tempDir, commit.files, commit.fileStages || {});
+
+        // Create the commit with custom timestamp
+        await createCommit(git, tempDir, commit.files, message, commit.timestamp);
+
+        // Track for summary
+        const { date, time } = formatTimestamp(commit.timestamp);
+        commitLog.push({
+          date,
+          time,
+          message,
+          fileCount: commit.files.length,
+        });
+
+        showProgress(commitIndex, totalCommitsToCreate, message);
+      }
+    }
+  } catch (error) {
+    showSanitizedError(`Failed during commit creation: ${error.message}`);
+    await cleanup(tempDir);
+    process.exit(1);
+  }
+
+  // ──────────────────────────────────────────────
+  // Step 10: Finalize (Remote Push vs Local Sync)
+  // ──────────────────────────────────────────────
+  console.log();
+  if (inputs.isLocalMode) {
+    const localUpdated = await syncLocalDirectoryGit(inputs.folderPath, tempDir);
+    if (localUpdated) {
+      showInfo("Local .git repository updated successfully! ✔");
+    }
+  } else {
+    try {
+      await pushToRemote(git);
+    } catch (error) {
+      showSanitizedError(error.message);
+      await cleanup(tempDir);
+      process.exit(1);
+    }
+
+    const synced = await syncLocalRepo(inputs.folderPath, inputs.repoUrl, inputs.username, inputs.pat);
+    if (synced) {
+      showInfo("Local git synced — your editor's Source Control is now up to date. ✔");
+    }
+  }
+
+  // ──────────────────────────────────────────────
+  // Step 11: Cleanup temp directory
+  // ──────────────────────────────────────────────
+  await cleanup(tempDir);
+
+  // ──────────────────────────────────────────────
+  // Step 12: Show summary
+  // ──────────────────────────────────────────────
+  const dateRange =
+    commitLog.length > 0
+      ? `${commitLog[0].date} → ${commitLog[commitLog.length - 1].date}`
+      : "N/A";
+
+  showSummary({
+    totalCommits: commitLog.length,
+    dateRange,
+    log: commitLog,
+  });
+}
+
+// Run
+main().catch((error) => {
+  showSanitizedError(`Unexpected error: ${error.message}`);
+  process.exit(1);
+});

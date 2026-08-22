@@ -97,11 +97,13 @@ const SYSTEM_PROMPT =
  *
  * @param {string[]} files - Relative file paths in the commit.
  * @param {string} sourceDir - Absolute path to the source project folder.
+ * @param {Record<string, string>} [fileStages] - Map of relative path to stage ('scaffold' | 'final').
  * @returns {Promise<string>} The commit message.
  */
-export async function generateMessage(files, sourceDir) {
-  // Build cache key
-  const cacheKey = [...files].sort().join("|");
+export async function generateMessage(files, sourceDir, fileStages = {}) {
+  // Build cache key including stage metadata
+  const stagesStr = Object.entries(fileStages || {}).sort().map(([k, v]) => `${k}:${v}`).join(",");
+  const cacheKey = `${[...files].sort().join("|")}#${stagesStr}`;
 
   if (messageCache.has(cacheKey)) {
     return messageCache.get(cacheKey);
@@ -109,13 +111,13 @@ export async function generateMessage(files, sourceDir) {
 
   // If API is not available, use fallback immediately
   if (!apiAvailable) {
-    const fallback = buildFallbackMessage(files, sourceDir);
+    const fallback = buildFallbackMessage(files, sourceDir, fileStages);
     messageCache.set(cacheKey, fallback);
     return fallback;
   }
 
   try {
-    const message = await callAPI(files, sourceDir);
+    const message = await callAPI(files, sourceDir, fileStages);
     messageCache.set(cacheKey, message);
     return message;
   } catch (error) {
@@ -124,7 +126,7 @@ export async function generateMessage(files, sourceDir) {
       showWarning(`AI Message Generation failed: ${error.message}. Using fallback commit messages.`);
       warnedOnce = true;
     }
-    const fallback = buildFallbackMessage(files, sourceDir);
+    const fallback = buildFallbackMessage(files, sourceDir, fileStages);
     messageCache.set(cacheKey, fallback);
     return fallback;
   }
@@ -196,7 +198,7 @@ let clientIndex = 0;
  * Call the OpenRouter API to generate a commit message.
  * Rotates clients and falls back to alternative free models on error.
  */
-async function callAPI(files, sourceDir) {
+async function callAPI(files, sourceDir, fileStages = {}) {
   // 1. Retrieve project info from package.json
   let projectInfo = "";
   try {
@@ -214,6 +216,13 @@ async function callAPI(files, sourceDir) {
 
   for (const file of files) {
     content += `\n- ${file}\n`;
+
+    const stage = fileStages[file];
+    if (stage === "scaffold") {
+      content += "  Stage: Initial scaffolding, types, interfaces, and function signatures\n";
+    } else if (stage === "final") {
+      content += "  Stage: Implementation and core functionality\n";
+    }
 
     if (isBinaryFile(file)) {
       content += "  Type: binary file\n";
@@ -461,7 +470,7 @@ function getFileCategory(file) {
 /**
  * Generate a commit message for a single file.
  */
-function generateSingleFileMessage(file, sourceDir) {
+function generateSingleFileMessage(file, sourceDir, stage = null) {
   const base = path.basename(file);
   const ext = path.extname(file).toLowerCase();
   const baseLower = base.toLowerCase();
@@ -472,6 +481,10 @@ function generateSingleFileMessage(file, sourceDir) {
   const fullPath = path.join(sourceDir, file);
   if (!fs.existsSync(fullPath)) {
     return `chore: Remove ${base}`;
+  }
+
+  if (stage === "scaffold") {
+    return `feat: Scaffold initial ${cleanName} structure`;
   }
 
   if (baseLower === 'package.json' || baseLower === 'package-lock.json' || baseLower === 'yarn.lock' || baseLower === 'pnpm-lock.yaml') {
@@ -495,6 +508,11 @@ function generateSingleFileMessage(file, sourceDir) {
   const category = getFileCategory(file);
 
   const symbol = extractFileSymbol(file, category, sourceDir);
+
+  if (stage === "final" && (category === "source" || category === "component")) {
+    const target = symbol || cleanName;
+    return `feat: Complete ${target} implementation and validation`;
+  }
 
   if (category === 'test') {
     const targetSymbol = symbol || cleanName;
@@ -583,7 +601,7 @@ function getConventionalPrefix(category) {
 /**
  * Build a fallback commit message when API is unavailable.
  */
-export function buildFallbackMessage(files, sourceDir) {
+export function buildFallbackMessage(files, sourceDir, fileStages = {}) {
   if (!files || files.length === 0) {
     return "chore: Update project files";
   }
@@ -598,7 +616,8 @@ export function buildFallbackMessage(files, sourceDir) {
   }
 
   if (files.length === 1) {
-    return generateSingleFileMessage(files[0], sourceDir);
+    const stage = fileStages[files[0]];
+    return generateSingleFileMessage(files[0], sourceDir, stage);
   }
 
   const categories = files.map(f => ({ file: f, cat: getFileCategory(f) }));
