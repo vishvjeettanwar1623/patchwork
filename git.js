@@ -3,14 +3,16 @@ import fs from "fs-extra";
 import path from "path";
 import os from "os";
 import ora from "ora";
+import { generateScaffoldContent } from "./progressive.js";
 
 /**
- * Create a temp working directory and initialize a git repo.
+ * Create a temp working directory and initialize a git repo for remote push.
  *
  * @param {string} repoUrl - GitHub repo URL (without .git suffix).
  * @param {string} username - GitHub username.
  * @param {string} pat - GitHub PAT.
- * @returns {Promise<{ tempDir: string, git: SimpleGit }>}
+ * @param {string} email - Committer email.
+ * @returns {Promise<{ tempDir: string, git: SimpleGit, isIncremental: boolean }>}
  */
 export async function setupRepo(repoUrl, username, pat, email) {
   // Create temp directory
@@ -45,11 +47,32 @@ export async function setupRepo(repoUrl, username, pat, email) {
 }
 
 /**
+ * Initialize a local git repository in a temp directory for offline/local mode.
+ *
+ * @param {string} targetDir - Project folder path.
+ * @param {string} username - Git committer username.
+ * @param {string} email - Git committer email.
+ * @returns {Promise<{ tempDir: string, git: SimpleGit, isIncremental: boolean }>}
+ */
+export async function setupLocalRepo(targetDir, username, email) {
+  const tempDir = path.join(os.tmpdir(), `patchwork-local-${Date.now()}`);
+  await fs.ensureDir(tempDir);
+
+  const git = simpleGit(tempDir);
+  await git.init();
+
+  await git.addConfig("user.name", username);
+  await git.addConfig("user.email", email);
+
+  return { tempDir, git, isIncremental: false };
+}
+
+/**
  * Build an authenticated HTTPS URL.
  */
 function buildAuthUrl(repoUrl, username, pat) {
-  if (!repoUrl.startsWith("http://") && !repoUrl.startsWith("https://")) {
-    return repoUrl;
+  if (!repoUrl || (!repoUrl.startsWith("http://") && !repoUrl.startsWith("https://"))) {
+    return repoUrl || "";
   }
   const urlObj = new URL(repoUrl.endsWith(".git") ? repoUrl : repoUrl + ".git");
   urlObj.username = username;
@@ -59,21 +82,35 @@ function buildAuthUrl(repoUrl, username, pat) {
 
 /**
  * Copy specific files from the source directory to the temp directory,
- * preserving directory structure.
+ * preserving directory structure and respecting progressive evolution stages.
  *
  * @param {string} sourceDir - Absolute path to the user's project folder.
  * @param {string} tempDir - Absolute path to the temp git repo.
  * @param {string[]} files - Relative file paths to copy.
+ * @param {Record<string, string>} [fileStages] - Map of relative path to stage ('scaffold' | 'final').
  */
-export async function copyFilesToTemp(sourceDir, tempDir, files) {
+export async function copyFilesToTemp(sourceDir, tempDir, files, fileStages = {}) {
   for (const file of files) {
     const src = path.join(sourceDir, file);
     const dest = path.join(tempDir, file);
 
     if (await fs.pathExists(src)) {
-      // Ensure destination directory exists
       await fs.ensureDir(path.dirname(dest));
-      await fs.copy(src, dest);
+
+      const stage = fileStages[file];
+      if (stage === "scaffold") {
+        try {
+          const fullContent = await fs.readFile(src, "utf8");
+          const scaffold = generateScaffoldContent(fullContent, file);
+          await fs.writeFile(dest, scaffold, "utf8");
+        } catch {
+          // Fallback to copying whole file if read fails
+          await fs.copy(src, dest);
+        }
+      } else {
+        // Full file copy for final stage or standard commits
+        await fs.copy(src, dest);
+      }
     } else {
       // Mirror local deletion by removing the file in the temp directory if it exists
       await fs.remove(dest);
@@ -126,11 +163,9 @@ export async function pushToRemote(git) {
   }).start();
 
   try {
-    // Detect the current branch name
     const branchSummary = await git.branchLocal();
     let branch = branchSummary.current || "main";
 
-    // If no branch exists yet (empty repo), default to main
     if (!branch || branch === "") {
       branch = "main";
     }
@@ -171,18 +206,38 @@ export async function cleanup(tempDir) {
 }
 
 /**
+ * Install the generated .git repository from tempDir directly into the user's project folder
+ * for Local-Only mode.
+ *
+ * @param {string} projectDir - Absolute path to user's project directory.
+ * @param {string} tempDir - Absolute path to temp directory containing .git.
+ * @returns {Promise<boolean>}
+ */
+export async function syncLocalDirectoryGit(projectDir, tempDir) {
+  const tempGitDir = path.join(tempDir, ".git");
+  const targetGitDir = path.join(projectDir, ".git");
+
+  if (!(await fs.pathExists(tempGitDir))) {
+    return false;
+  }
+
+  try {
+    // If a .git already exists in project, back it up safely
+    if (await fs.pathExists(targetGitDir)) {
+      const backupDir = path.join(projectDir, `.git.bak-${Date.now()}`);
+      await fs.move(targetGitDir, backupDir, { overwrite: true });
+    }
+
+    // Move the newly constructed .git directory into projectDir
+    await fs.copy(tempGitDir, targetGitDir);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+/**
  * Sync the user's actual project folder with what PatchWork just pushed.
- *
- * Runs `git fetch origin` then `git reset --hard origin` so the local branch
- * snaps to exactly match the remote — VS Code / any editor's Source Control
- * panel will reflect the pushed state with 0 pending changes for committed
- * files.
- *
- * Using bare "origin" (not "origin/master" or "origin/main") lets git resolve
- * the remote's default branch via origin/HEAD automatically.
- *
- * @param {string} folderPath - Absolute path to the user's project folder.
- * @returns {Promise<boolean>} true if sync succeeded, false if skipped/failed.
  */
 export async function syncLocalRepo(folderPath, repoUrl, username, pat) {
   const localGit = simpleGit(folderPath);
@@ -194,7 +249,6 @@ export async function syncLocalRepo(folderPath, repoUrl, username, pat) {
       await localGit.init();
     }
 
-    // Configure remote origin using the clean repo URL (no credentials) if not present
     if (repoUrl) {
       const remotes = await localGit.getRemotes(true);
       const originRemote = remotes.find(r => r.name === "origin");
@@ -205,20 +259,16 @@ export async function syncLocalRepo(folderPath, repoUrl, username, pat) {
     }
 
     if (repoUrl && username && pat) {
-      // Fetch on-the-fly from the authenticated URL to avoid saving credentials in git config
       const authUrl = buildAuthUrl(repoUrl, username, pat);
       await localGit.fetch(authUrl);
-      // Snap current branch to match the fetched remote state exactly
       await localGit.reset(["--hard", "FETCH_HEAD"]);
     } else {
-      // Fallback if credentials are not provided
       await localGit.fetch("origin");
       await localGit.reset(["--hard", "origin"]);
     }
 
     return true;
   } catch {
-    // Not a fatal error — user can still run `git fetch && git reset --hard origin` manually.
     return false;
   }
 }
