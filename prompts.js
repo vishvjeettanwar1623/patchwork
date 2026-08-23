@@ -258,52 +258,102 @@ export async function askLargeProjectConfirm() {
 }
 
 /**
+ * Prompt for execution mode (Remote vs Local-Only).
+ */
+export async function askMode() {
+  const { mode } = await inquirer.prompt([
+    {
+      type: "list",
+      name: "mode",
+      message: "Select execution mode:",
+      choices: [
+        { name: "🚀 Push to Remote (Commit & push to GitHub repository)", value: "remote" },
+        { name: "💻 Local-Only (Create Git history locally, no GitHub PAT or remote push)", value: "local" },
+      ],
+      default: "remote",
+    },
+  ]);
+  return mode;
+}
+
+/**
+ * Prompt user to confirm proceeding with commit creation after timeline preview.
+ */
+export async function askProceedWithCommits() {
+  const { proceed } = await inquirer.prompt([
+    {
+      type: "confirm",
+      name: "proceed",
+      message: "Do you want to proceed and create these commits?",
+      default: true,
+    },
+  ]);
+  return proceed;
+}
+
+/**
  * Collect all user inputs sequentially.
  */
 export async function collectInputs() {
+  const args = process.argv.slice(2);
+  const isDryRunFlag = args.includes("--dry-run") || args.includes("-d");
+  const isLocalFlag = args.includes("--local") || args.includes("-l");
+  const isNoEvolutionFlag = args.includes("--no-evolution") || args.includes("--no-progressive");
+
   // 1. Auto-detect folder path (CWD)
   const folderPath = process.cwd();
   console.log(`\x1b[32m✔\x1b[39m Path to your project folder: \x1b[36m${folderPath}\x1b[39m`);
 
-  // 2. Auto-detect GitHub username
+  // 2. Determine execution mode (Remote vs Local)
+  let isLocalMode = isLocalFlag;
+  if (!isLocalFlag) {
+    const selectedMode = await askMode();
+    isLocalMode = selectedMode === "local";
+  }
+
+  // 3. User & Email configuration
   let username = process.env.GITHUB_USERNAME;
   if (username && username.trim()) {
-    console.log(`\x1b[32m✔\x1b[39m GitHub username: \x1b[36m${username.trim()}\x1b[39m \x1b[90m[Loaded from .env]\x1b[39m`);
+    console.log(`\x1b[32m✔\x1b[39m Git username: \x1b[36m${username.trim()}\x1b[39m \x1b[90m[Loaded from .env]\x1b[39m`);
   } else {
     username = getGitConfig("user.name") || getGlobalGitConfig("user.name");
     if (username) {
-      console.log(`\x1b[32m✔\x1b[39m GitHub username: \x1b[36m${username}\x1b[39m`);
+      console.log(`\x1b[32m✔\x1b[39m Git username: \x1b[36m${username}\x1b[39m`);
     } else {
       username = await askUsername();
     }
   }
 
-  // 3. Auto-detect Repo URL
-  let rawRepoUrl = getGitConfig("remote.origin.url");
-  let repoUrl = "";
-  if (rawRepoUrl) {
-    repoUrl = normalizeRepoUrl(rawRepoUrl);
-    console.log(`\x1b[32m✔\x1b[39m GitHub repository URL (HTTPS): \x1b[36m${repoUrl}\x1b[39m`);
-  } else {
-    repoUrl = await askRepoUrl();
-  }
-
-  // 4. Load PAT
-  const pat = await askPAT();
-
-  // 4b. Auto-detect or load GitHub email
   let email = process.env.GITHUB_EMAIL;
   if (email && email.trim()) {
-    console.log(`\x1b[32m✔\x1b[39m GitHub email: \x1b[36m${email.trim()}\x1b[39m \x1b[90m[Loaded from .env]\x1b[39m`);
+    console.log(`\x1b[32m✔\x1b[39m Git email: \x1b[36m${email.trim()}\x1b[39m \x1b[90m[Loaded from .env]\x1b[39m`);
     email = email.trim();
   } else {
     email = getGitConfig("user.email") || getGlobalGitConfig("user.email");
     if (email && email.trim()) {
-      console.log(`\x1b[32m✔\x1b[39m GitHub email: \x1b[36m${email.trim()}\x1b[39m \x1b[90m[Auto-detected]\x1b[39m`);
+      console.log(`\x1b[32m✔\x1b[39m Git email: \x1b[36m${email.trim()}\x1b[39m \x1b[90m[Auto-detected]\x1b[39m`);
       email = email.trim();
     } else {
       email = await askEmail();
     }
+  }
+
+  // 4. Remote specific configuration (Repo URL & PAT)
+  let repoUrl = "";
+  let pat = "";
+
+  if (!isLocalMode) {
+    let rawRepoUrl = getGitConfig("remote.origin.url");
+    if (rawRepoUrl) {
+      repoUrl = normalizeRepoUrl(rawRepoUrl);
+      console.log(`\x1b[32m✔\x1b[39m GitHub repository URL (HTTPS): \x1b[36m${repoUrl}\x1b[39m`);
+    } else {
+      repoUrl = await askRepoUrl();
+    }
+
+    pat = await askPAT();
+  } else {
+    console.log(`\x1b[33m✔\x1b[39m Running in \x1b[1mLocal-Only Mode\x1b[22m (Skipping remote URL and PAT)`);
   }
 
   // 5. Ask for days
@@ -322,5 +372,16 @@ export async function collectInputs() {
     startDate.setDate(startDate.getDate() - (days - 1));
   }
 
-  return { folderPath, repoUrl, username, email, pat, days, startDate };
+  return {
+    folderPath,
+    repoUrl,
+    username,
+    email,
+    pat,
+    days,
+    startDate,
+    isLocalMode,
+    isDryRun: isDryRunFlag,
+    enableProgressive: !isNoEvolutionFlag,
+  };
 }

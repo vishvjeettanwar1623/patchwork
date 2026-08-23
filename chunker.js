@@ -108,3 +108,94 @@ function distributeFilesAcrossDays(files, days) {
     chunks.push(files.slice(offset, offset + count));
     offset += count;
   }
+
+  if (offset < files.length) {
+    if (chunks.length > 0) {
+      chunks[chunks.length - 1].push(...files.slice(offset));
+    } else {
+      chunks.push(files.slice(offset));
+    }
+  }
+
+  return chunks;
+}
+
+/**
+ * Split a day's files into micro-commits (1–4 files each, 1–6 commits per day).
+ */
+function splitIntoMicroCommits(dayFiles) {
+  if (dayFiles.length === 0) return [];
+
+  const maxCommits = Math.min(6, dayFiles.length);
+  const commitCount = Math.max(1, Math.floor(Math.random() * maxCommits) + 1);
+
+  const commits = [];
+  let offset = 0;
+
+  for (let i = 0; i < commitCount; i++) {
+    const remaining = dayFiles.length - offset;
+    const commitsLeft = commitCount - i;
+
+    if (remaining <= 0) break;
+
+    let count;
+    if (commitsLeft === 1) {
+      count = remaining;
+    } else {
+      const maxForThis = Math.min(4, remaining - (commitsLeft - 1));
+      count = Math.max(1, Math.floor(Math.random() * maxForThis) + 1);
+    }
+
+    commits.push({ files: dayFiles.slice(offset, offset + count) });
+    offset += count;
+  }
+
+  return commits;
+}
+
+/**
+ * Split a day's staged files into micro-commits preserving stage metadata.
+ */
+function splitIntoMicroCommitsWithStages(dayItems) {
+  if (dayItems.length === 0) return [];
+
+  const maxCommits = Math.min(6, dayItems.length);
+  const commitCount = Math.max(1, Math.floor(Math.random() * maxCommits) + 1);
+
+  const commits = [];
+  let offset = 0;
+
+  for (let i = 0; i < commitCount; i++) {
+    const remaining = dayItems.length - offset;
+    const commitsLeft = commitCount - i;
+
+    if (remaining <= 0) break;
+
+    let count;
+    if (commitsLeft === 1) {
+      count = remaining;
+    } else {
+      const maxForThis = Math.min(4, remaining - (commitsLeft - 1));
+      count = Math.max(1, Math.floor(Math.random() * maxForThis) + 1);
+    }
+
+    const items = dayItems.slice(offset, offset + count);
+    const files = items.map(item => item.file);
+    const fileStages = {};
+    for (const item of items) {
+      fileStages[item.file] = item.stage;
+    }
+
+    commits.push({ files, fileStages });
+    offset += count;
+  }
+
+  return commits;
+}
+
+/**
+ * Get total commit count across all days.
+ */
+export function getTotalCommitCount(chunks) {
+  return chunks.reduce((sum, day) => sum + day.commits.length, 0);
+}
