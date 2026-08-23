@@ -8,7 +8,8 @@
     "patchwork": "./bin.cjs"
   },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node test_features.js"
   },
   "keywords": ["git", "commits", "cli", "developer-tools"],
   "license": "MIT",
